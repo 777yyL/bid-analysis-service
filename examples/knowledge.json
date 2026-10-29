@@ -1,0 +1,25 @@
+{
+  "version": "demo-only-v1",
+  "quality": "full",
+  "lines": [
+    {
+      "business_domain": "演示教育业务",
+      "business_line": "校园安防（演示）",
+      "body_md": "本演示业务提供学校视频监控、摄像机、门禁及安防平台。直接采购这些产品可作为标的匹配证据；仅采购教学家具不相关。采购人属于学校只能支持场景与采购人维度，不能代替采购标的。"
+    },
+    {
+      "business_domain": "演示医疗业务",
+      "business_line": "医院物联（演示）",
+      "body_md": "本演示业务提供医院病房物联网、环境传感器与物联平台。不包含单纯药品采购。应以本次采购清单或技术需求为依据。"
+    }
+  ],
+  "keywords": [
+    {"business_line": "校园安防（演示）", "word": "摄像机", "kind": "core"},
+    {"business_line": "校园安防（演示）", "word": "门禁", "kind": "core"},
+    {"business_line": "校园安防（演示）", "word": "学校", "kind": "scene"},
+    {"business_line": "校园安防（演示）", "word": "视频监控", "kind": "tech", "term_family": "视觉感知类"},
+    {"business_line": "医院物联（演示）", "word": "环境传感器", "kind": "core"},
+    {"business_line": "医院物联（演示）", "word": "病房", "kind": "scene"}
+  ],
+  "source_rubric": {"demo_only": true, "note": "演示知识，正式验证前必须同步或导入公司实际业务知识。"}
+}

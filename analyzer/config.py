@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     analyzer_api_key: SecretStr = SecretStr("")
     database_url: str = "sqlite:///./analysis.db"
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     source_page_param: str = "page"
     source_page_size_param: str = "page_size"
     source_body_field: str = ""
+    http_trust_env: bool = False
 
     llm_enabled: bool = False
     llm_base_url: str = ""

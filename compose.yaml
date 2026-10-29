@@ -1,0 +1,40 @@
+name: bid-analysis
+
+services:
+  analysis-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bid_analysis
+      POSTGRES_USER: bid_analysis
+      POSTGRES_PASSWORD: ${ANALYSIS_DB_PASSWORD:?Set ANALYSIS_DB_PASSWORD in .env}
+    volumes:
+      - analysis-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bid_analysis -d bid_analysis"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  analyzer:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://bid_analysis:${ANALYSIS_DB_PASSWORD}@analysis-db:5432/bid_analysis
+      ANALYZER_API_KEY: ${ANALYZER_API_KEY:?Set ANALYZER_API_KEY in .env}
+    ports:
+      - "${ANALYZER_BIND_HOST:-127.0.0.1}:${ANALYZER_PORT:-8100}:8100"
+    depends_on:
+      analysis-db:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  analysis-db-data:
