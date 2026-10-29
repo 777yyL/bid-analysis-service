@@ -5,14 +5,15 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 root = Path(__file__).resolve().parent.parent
-target = root / "dist" / "bid-analysis-service-0.2.0.zip"
+target = root / "dist" / "bid-analysis-service-0.2.1.zip"
 ui = root / "frontend" / "dist" / "index.html"
 if not ui.is_file():
     raise SystemExit("Build frontend first: cd frontend && npm ci && npm run build")
 target.parent.mkdir(exist_ok=True)
 files = [root / name for name in (
     ".env.example", ".gitignore", ".gitattributes", "requirements.in", "requirements.txt",
-    "requirements-dev.in", "requirements-dev.txt", "pyproject.toml")]
+    "requirements-dev.in", "requirements-dev.txt", "pyproject.toml", "Dockerfile",
+    "compose.yaml", ".dockerignore", ".env.docker.example")]
 for folder in ("analyzer", "tests", "examples", "scripts", "frontend/src", "frontend/dist"):
     files.extend(p for p in (root / folder).rglob("*")
                  if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
