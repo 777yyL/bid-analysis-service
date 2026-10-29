@@ -8,3 +8,7 @@ __pycache__/
 *.sqlite*
 dist/
 *.egg-info/
+frontend/node_modules/
+frontend/dist/
+logs/
+*.pid

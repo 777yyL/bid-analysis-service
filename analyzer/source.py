@@ -4,6 +4,9 @@ import asyncio
 import hashlib
 import json
 import math
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import httpx
@@ -215,6 +218,8 @@ class SourceClient:
 
     async def fetch_notice(self, notice_id: int) -> NoticeInput:
         notice_id = _positive_id(notice_id, "notice_id")
+        if self._file_database_enabled():
+            return (await self.fetch_notice_batch([notice_id]))[0]
         payload = await self._json(self.settings.source_notice_path.format(notice_id=notice_id))
         envelopes = _envelopes(payload)
         metadata = {}
@@ -282,11 +287,197 @@ class SourceClient:
                 notice_id=notice_id, title=title, buyer=_text(metadata.get("buyer")),
                 notice_type=_text(metadata.get("notice_type") or metadata.get("channel")),
                 project_key=metadata.get("project_key_name") or metadata.get("project_key"),
+                publish_at=metadata.get("publish_at") or None,
                 body=body, scope_summary=_text(metadata.get("scope_summary")), lots=lots,
                 attachments=attachments, warnings=warnings,
             )
         except ValidationError:
             raise SourceError("来源公告字段不符合分析输入契约") from None
+
+    def _file_database_enabled(self) -> bool:
+        return bool(self.settings.source_db_dsn.get_secret_value()
+                    and getattr(self.settings, "source_file_root", ""))
+
+    async def fetch_notice_batch(self, notice_ids: list[int]) -> list[NoticeInput]:
+        ids = list(dict.fromkeys(_positive_id(value, "notice_id") for value in notice_ids))
+        if not ids:
+            return []
+        if len(ids) > 1000:
+            raise SourceError("单批公告不能超过 1000 条")
+        if self._file_database_enabled():
+            return await asyncio.to_thread(self._database_notices, ids, 0, len(ids), None)
+        # Keep API concurrency bounded; source hosts may share a constrained connection pool.
+        gate = asyncio.Semaphore(4)
+
+        async def fetch(nid):
+            async with gate:
+                return await self.fetch_notice(nid)
+
+        return list(await asyncio.gather(*(fetch(nid) for nid in ids)))
+
+    async def list_notice_batch(self, after_id: int = 0, limit: int = 100,
+                                updated_since: float | None = None) -> list[NoticeInput]:
+        if isinstance(after_id, bool) or after_id < 0 or not 1 <= limit <= 1000:
+            raise SourceError("批量游标或批次大小无效")
+        if not self._file_database_enabled():
+            raise SourceError("游标批量同步需要配置 SOURCE_DB_DSN 和 SOURCE_FILE_ROOT；接口来源请使用分页同步")
+        if updated_since is not None and (not math.isfinite(updated_since) or updated_since < 0):
+            raise SourceError("增量更新时间无效")
+        return await asyncio.to_thread(self._database_notices, None, after_id, limit, updated_since)
+
+    def _read_source_file(self, relative: Any, warnings: list[str], label: str) -> str:
+        if not relative:
+            warnings.append(f"{label}缺少文本路径")
+            return ""
+        try:
+            raw = _text(relative)
+            # Source paths are portable relative paths. Reject Windows rooted paths on Unix too.
+            win_path = PureWindowsPath(raw)
+            path = Path(raw.replace("\\", "/"))
+            if path.is_absolute() or win_path.drive or win_path.root:
+                raise ValueError("absolute source path")
+            root = Path(getattr(self.settings, "source_file_root", "")).resolve(strict=True)
+            resolved = (root / path).resolve(strict=True)
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                raise ValueError("outside file root")
+            if resolved.stat().st_size > self.settings.source_max_response_bytes:
+                warnings.append(f"{label}文本超过读取上限，未截断处理")
+                return ""
+            with resolved.open("rb") as handle:
+                content = handle.read(self.settings.source_max_response_bytes + 1)
+            if len(content) > self.settings.source_max_response_bytes:
+                warnings.append(f"{label}文本超过读取上限，未截断处理")
+                return ""
+            return content.decode("utf-8-sig").strip()
+        except (OSError, ValueError, UnicodeDecodeError):
+            warnings.append(f"{label}文本文件不存在、不可读或路径越界")
+            return ""
+
+    @staticmethod
+    def _source_columns(connection) -> dict[str, set[str]]:
+        rows = connection.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name IN ('notices','attachments','lots')"
+        ).fetchall()
+        columns: dict[str, set[str]] = {}
+        for row in rows:
+            columns.setdefault(row["table_name"], set()).add(row["column_name"])
+        if not {"notice_id", "title", "content_path"} <= columns.get("notices", set()):
+            raise SourceError("来源 notices 缺少 notice_id/title/content_path 必需字段")
+        if not {"att_id", "notice_id", "text_path", "extract_status"} <= columns.get("attachments", set()):
+            raise SourceError("来源 attachments 缺少附件元数据必需字段，不能判定材料是否完整")
+        return columns
+
+    def _database_notices(self, ids: list[int] | None, after_id: int,
+                          limit: int, updated_since: float | None) -> list[NoticeInput]:
+        try:
+            with self._connect() as connection:
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                columns = self._source_columns(connection)
+                available = columns["notices"]
+                selected = [name for name in (
+                    "notice_id", "title", "buyer", "notice_type", "channel", "project_key_name",
+                    "project_key", "scope_summary", "content_path", "revoke_status", "publish_at"
+                ) if name in available]
+                # Identifiers come exclusively from the hardcoded allowlist above; values are bound.
+                query = "SELECT " + ", ".join(selected) + " FROM public.notices WHERE "
+                if ids is not None:
+                    query += "notice_id = ANY(%s)"
+                    params: list[Any] = [ids]
+                else:
+                    query += "notice_id > %s"
+                    params = [after_id]
+                if updated_since is not None:
+                    if "updated_at" not in available:
+                        raise SourceError("来源没有可靠的 updated_at 更新时间字段；请执行补偿扫描")
+                    query += " AND updated_at >= %s"
+                    params.append(datetime.fromtimestamp(updated_since, timezone.utc))
+                query += " ORDER BY notice_id LIMIT %s"
+                params.append(limit)
+                notices = connection.execute(query, tuple(params)).fetchall()
+                found = [int(row["notice_id"]) for row in notices]
+                if ids is not None and set(ids) != set(found):
+                    raise SourceError("请求的部分来源公告不存在，未静默跳过")
+                attachments: list[dict] = []
+                lots: list[dict] = []
+                duplicate_paths: dict[str, list[str]] = {}
+                if found:
+                    for table, fields, target in (
+                        ("attachments", ("att_id", "notice_id", "filename", "sha256", "text_path",
+                                         "extract_status", "summary", "skip_reason"), attachments),
+                        ("lots", ("notice_id", "lot_no", "lot_name", "description"), lots),
+                    ):
+                        actual = columns.get(table, set())
+                        if "notice_id" not in actual:
+                            continue
+                        fields_present = [name for name in fields if name in actual]
+                        target.extend(connection.execute(
+                            "SELECT " + ", ".join(fields_present) + f" FROM public.{table} "
+                            "WHERE notice_id = ANY(%s)", (found,)
+                        ).fetchall())
+                    hashes = list({att["sha256"] for att in attachments if att.get("sha256")
+                                   and (not att.get("text_path") or att.get("extract_status") != "ok")})
+                    if hashes and "sha256" in columns["attachments"]:
+                        copies = connection.execute(
+                            "SELECT sha256, text_path FROM public.attachments "
+                            "WHERE sha256 = ANY(%s) AND extract_status = 'ok' "
+                            "AND text_path IS NOT NULL ORDER BY att_id", (hashes,)
+                        ).fetchall()
+                        for copy in copies:
+                            duplicate_paths.setdefault(copy["sha256"], []).append(copy["text_path"])
+            attachments_by_notice, lots_by_notice = defaultdict(list), defaultdict(list)
+            for att in attachments:
+                attachments_by_notice[int(att["notice_id"])].append(att)
+            for lot in lots:
+                lots_by_notice[int(lot["notice_id"])].append(lot)
+            results = []
+            for row in notices:
+                nid = int(row["notice_id"])
+                warnings: list[str] = []
+                body = self._read_source_file(row.get("content_path"), warnings, "公告正文")
+                if row.get("revoke_status") not in (None, "active"):
+                    warnings.append("来源公告已撤销；历史标签仅供追溯")
+                att_items = []
+                for att in attachments_by_notice[nid]:
+                    att_id = _positive_id(att.get("att_id"), "att_id")
+                    att_warnings: list[str] = []
+                    att_text = self._read_source_file(att.get("text_path"), att_warnings, f"附件 {att_id}")
+                    extraction = att.get("extract_status")
+                    if not att_text:
+                        for copy_path in duplicate_paths.get(att.get("sha256"), []):
+                            att_text = self._read_source_file(copy_path, [], f"附件 {att_id}")
+                            if att_text:
+                                extraction = "ok"
+                                att_warnings = []
+                                break
+                    warnings.extend(att_warnings)
+                    if att_text and extraction not in (None, "ok"):
+                        warnings.append(f"附件 {att_id} 文本解析状态不是完整成功")
+                    att_items.append(Attachment(
+                        att_id=att_id, filename=_text(att.get("filename")),
+                        sha256=att.get("sha256"), text=att_text,
+                        summary=_text(att.get("summary")), extract_status=extraction,
+                    ))
+                results.append(NoticeInput(
+                    notice_id=nid, title=_text(row.get("title")), buyer=_text(row.get("buyer")),
+                    notice_type=_text(row.get("notice_type") or row.get("channel")),
+                    project_key=row.get("project_key_name") or row.get("project_key"),
+                    publish_at=row["publish_at"].isoformat() if isinstance(row.get("publish_at"), datetime)
+                    else row.get("publish_at") or None,
+                    scope_summary=_text(row.get("scope_summary")), body=body,
+                    attachments=att_items, warnings=warnings,
+                    lots=[Lot(lot_no=_text(lot.get("lot_no")), lot_name=_text(lot.get("lot_name")),
+                              description=_text(lot.get("description")))
+                          for lot in lots_by_notice[nid]],
+                ))
+            if ids is not None:
+                by_id = {notice.notice_id: notice for notice in results}
+                return [by_id[nid] for nid in ids]
+            return results
+        except psycopg.Error:
+            raise SourceError("来源只读数据库批量查询失败", retryable=True) from None
+        except ValidationError:
+            raise SourceError("来源批量公告字段不符合分析输入契约") from None
 
     def _connect(self):
         return psycopg.connect(

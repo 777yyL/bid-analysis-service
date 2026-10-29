@@ -2,20 +2,25 @@ import asyncio
 import contextlib
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 
 from analyzer import __version__
 from analyzer.config import Settings
 from analyzer.llm import JudgeClient
+from analyzer.pipeline import Pipeline
 from analyzer.schemas import SCORING_VERSION, KnowledgeInput, NoticeInput, StrictModel
 from analyzer.source import SourceClient, SourceError
 from analyzer.store import Store
+from analyzer.v2_api import router as v2_router
 from analyzer.worker import Worker
+from analyzer.workspace import Workspace
 
 Mode = Literal["prepare", "judge"]
 JobStatus = Literal["queued", "running", "retry", "ready", "completed", "needs_review", "failed"]
@@ -68,15 +73,26 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
     source = source_client or SourceClient(cfg, text_cache=store)
     judge = judge_client or JudgeClient(cfg)
     worker = Worker(cfg, store, source, judge)
+    workspace = Workspace(store)
+    pipeline = Pipeline(cfg, workspace, source, judge)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.initialize()
         task = asyncio.create_task(worker.run()) if cfg.worker_enabled else None
+        v2_tasks = [asyncio.create_task(pipeline.run(kind)) for kind in ("rule", "model")] if cfg.worker_enabled else []
+        if cfg.worker_enabled:
+            v2_tasks.append(asyncio.create_task(pipeline.sync_loop()))
         app.state.worker_task = task
+        app.state.v2_tasks = v2_tasks
         try:
             yield
         finally:
+            for pending in v2_tasks:
+                pending.cancel()
+            for pending in v2_tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -88,6 +104,7 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
     app = FastAPI(title="招标业务相关度分析服务", version=__version__,
                   description=DESCRIPTION, lifespan=lifespan)
     app.state.store, app.state.worker = store, worker
+    app.state.workspace, app.state.pipeline = workspace, pipeline
     api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
     async def auth(key: str | None = Depends(api_key_header)):
@@ -113,7 +130,7 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
 
     @app.get("/", include_in_schema=False)
     async def root():
-        return RedirectResponse("/docs")
+        return RedirectResponse("/ui/" if ui_path.is_dir() else "/docs")
 
     @app.get("/healthz", tags=["运行状态"])
     async def health():
@@ -124,6 +141,8 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
         task = getattr(app.state, "worker_task", None)
         if task and task.done():
             raise HTTPException(503, "后台任务进程已退出")
+        if any(t.done() for t in getattr(app.state, "v2_tasks", [])):
+            raise HTTPException(503, "标签处理或同步进程已退出")
         return {"status": "ok", "version": __version__, "worker_enabled": cfg.worker_enabled}
 
     @app.get("/config", dependencies=protected, tags=["运行状态"])
@@ -145,7 +164,10 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
 
     @app.post("/knowledge/import", dependencies=protected, tags=["业务知识"])
     async def import_knowledge(payload: KnowledgeInput):
+        previous = store.active_knowledge_id()
         key = store.save_knowledge(payload)
+        if previous != key:
+            workspace.set_state("reindex", {"cursor": 0, "knowledge_id": key, "enabled": True})
         return {"knowledge_id": key, "version": payload.version, "quality": payload.quality,
                 "line_count": len(payload.lines), "keyword_count": len(payload.keywords),
                 "warnings": payload.warnings}
@@ -156,7 +178,12 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
             knowledge = await source.fetch_knowledge()
         except SourceError as error:
             raise HTTPException(502, str(error)) from None
-        return await import_knowledge(knowledge)
+        current = store.active_knowledge_id()
+        if current:
+            knowledge = knowledge.model_copy(update={"product_keywords": store.get_knowledge(current).product_keywords})
+        result = await import_knowledge(knowledge)
+        workspace.set_state("reindex", {"cursor": 0, "knowledge_id": result["knowledge_id"], "enabled": True})
+        return result
 
     @app.get("/knowledge", dependencies=protected, tags=["业务知识"])
     async def get_knowledge():
@@ -204,4 +231,8 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
     async def metrics():
         return store.metrics()
 
+    app.include_router(v2_router(cfg, workspace, pipeline, auth))
+    ui_path = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    if ui_path.is_dir():
+        app.mount("/ui", StaticFiles(directory=ui_path, html=True), name="ui")
     return app

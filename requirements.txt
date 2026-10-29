@@ -15,6 +15,7 @@ psycopg-binary==3.3.6
 pydantic==2.14.1
 pydantic-core==2.50.1
 pydantic-settings==2.16.1
+pyahocorasick==2.3.1
 python-dotenv==1.2.4
 soupsieve==3.0.4
 sqlalchemy==2.1.6

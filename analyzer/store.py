@@ -270,6 +270,14 @@ class Store:
             row = session.get(ResultCache, key)
             return row.payload if row else None
 
+    def set_cached_result(self, key: str, value: dict):
+        with self.session.begin() as session:
+            row = session.get(ResultCache, key)
+            if row:
+                row.payload, row.created_at = value, time.time()
+            else:
+                session.add(ResultCache(key=key, payload=value, created_at=time.time()))
+
     def get_text(self, key: str) -> str | None:
         with self.session() as session:
             row = session.get(TextCacheRow, key)

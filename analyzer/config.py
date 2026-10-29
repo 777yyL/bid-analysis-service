@@ -1,11 +1,16 @@
+from psycopg import ProgrammingError
+from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     analyzer_api_key: SecretStr = SecretStr("")
+    analyzer_bind_host: str = "0.0.0.0"
+    analyzer_port: int = Field(default=8100, ge=1, le=65535)
     database_url: str = "sqlite:///./analysis.db"
     source_base_url: str = "http://10.33.65.152:8099"
     source_api_token: SecretStr = SecretStr("")
@@ -20,6 +25,13 @@ class Settings(BaseSettings):
     source_page_param: str = "page"
     source_page_size_param: str = "page_size"
     source_body_field: str = ""
+    source_file_root: str = ""
+    knowledge_files_dir: str = ""
+    sync_interval_seconds: float = Field(default=300, ge=5)
+    sync_batch_size: int = Field(default=100, ge=1, le=500)
+    incremental_enabled: bool = False
+    incremental_lookback_seconds: int = Field(default=86400, ge=60)
+    compensation_interval_seconds: int = Field(default=21600, ge=60)
     http_trust_env: bool = False
 
     llm_enabled: bool = False
@@ -44,6 +56,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime(self):
+        target = make_url(self.database_url)
+        if target.drivername.startswith("postgres") and self.source_db_dsn.get_secret_value():
+            try:
+                source = conninfo_to_dict(self.source_db_dsn.get_secret_value())
+            except ProgrammingError:
+                source = {}
+            if (source.get("dbname") and target.database == source["dbname"]
+                    and (target.host or "localhost").casefold() == source.get("host", "localhost").casefold()
+                    and (target.port or 5432) == int(source.get("port", "5432"))):
+                raise ValueError("DATABASE_URL 必须使用独立分析数据库，不能指向 SOURCE_DB_DSN 原库")
         if self.llm_enabled and (not self.llm_base_url or not self.llm_model):
             raise ValueError("LLM_ENABLED=true 时必须配置 LLM_BASE_URL 和 LLM_MODEL")
         if not self.source_base_url.startswith(("http://", "https://")):

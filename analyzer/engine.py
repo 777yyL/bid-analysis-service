@@ -14,6 +14,7 @@ from analyzer.schemas import (
     NoticeInput,
     Prepared,
 )
+from analyzer.tagging import match_terms
 
 WEIGHTS = {"core": 6, "ext": 3, "scene": 1, "tech": 2, "negative": 0}
 
@@ -56,14 +57,16 @@ def prepare(notice: NoticeInput, knowledge: KnowledgeInput, settings: Settings) 
     if knowledge.quality != "full":
         warnings.append("知识仅含词表或内容不完整，需要人工复核")
     keywords = [kw for kw in knowledge.keywords if kw.enabled and _normalized(kw.word)]
-    normalized_words = {kw.word: _normalized(kw.word) for kw in keywords}
+    words = tuple({kw.word for kw in keywords})
     scores = defaultdict(float)
     matches = defaultdict(set)
+    source_words = {}
     for source, text in [*originals, *routing]:
-        value = _normalized(text)
+        found = {hit["term"] for hit in match_terms(text, words)}
+        source_words[source] = found
         factor = 0.5 if source.startswith("summary:") or source == "buyer" else 1
         for kw in keywords:
-            if WEIGHTS[kw.kind] and normalized_words[kw.word] in value:
+            if WEIGHTS[kw.kind] and kw.word in found:
                 scores[kw.business_line] += WEIGHTS[kw.kind] * factor
                 matches[kw.business_line].add(kw.word)
     lines = {line.business_line: line for line in knowledge.lines}
@@ -97,13 +100,12 @@ def prepare(notice: NoticeInput, knowledge: KnowledgeInput, settings: Settings) 
             fragment = text[offset:offset + width]
             if not fragment.strip():
                 continue
-            normalized = _normalized(fragment)
-            words = {word for word in relevant_words if normalized_words[word] in normalized}
-            score = sum(relevant_words[word] for word in words) + 10 * len(words & negative_words)
+            found = {hit["term"] for hit in match_terms(fragment, relevant_words)}
+            score = sum(relevant_words[word] for word in found) + 10 * len(found & negative_words)
             if any(term in fragment for term in ("采购内容", "采购清单", "技术要求", "服务范围", "采购需求")):
                 score += 2
             evidence = Evidence(id=_hash([source, offset, fragment])[:20], source=source, text=fragment)
-            chunks.append((evidence, score, words))
+            chunks.append((evidence, score, found))
             if offset + width >= len(text):
                 break
 
@@ -123,10 +125,9 @@ def prepare(notice: NoticeInput, knowledge: KnowledgeInput, settings: Settings) 
 
     ordered = sorted(chunks, key=lambda item: (-item[1], item[0].source, item[0].id))
     # A negative condition must not disappear behind many repeated positive hits.
-    for source, text in originals:
-        normalized = _normalized(text)
+    for source, _ in originals:
         for word in sorted(negative_words):
-            if normalized_words[word] not in normalized:
+            if word not in source_words[source]:
                 continue
             item = next((item for item in ordered
                          if item[0].source == source and word in item[2]), None)
