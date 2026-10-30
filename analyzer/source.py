@@ -53,6 +53,7 @@ def _notice_phase(row: dict) -> str:
 
 def _selection_metadata(row: dict) -> dict:
     return {
+        "project_channel": _text(row.get("project_channel")).strip() or None,
         "round_key": _text(row.get("round_key")).strip() or None,
         "lot_key": _text(row.get("lot_key")).strip() or None,
         "related_notice_id": _positive_id(row["related_notice_id"], "related_notice_id")
@@ -350,7 +351,7 @@ class SourceClient:
                     and getattr(self.settings, "source_file_root", ""))
 
     async def fetch_notice_batch(self, notice_ids: list[int],
-                                 procurement_only: bool = False) -> list[NoticeInput]:
+                                 procurement_only: bool = False, progress=None) -> list[NoticeInput]:
         ids = list(dict.fromkeys(_positive_id(value, "notice_id") for value in notice_ids))
         if not ids:
             return []
@@ -358,7 +359,7 @@ class SourceClient:
             raise SourceError("单批公告不能超过 1000 条")
         if self._file_database_enabled():
             return await asyncio.to_thread(self._database_notices, ids, 0, len(ids), None,
-                                           procurement_only)
+                                           procurement_only, None, progress)
         # Keep API concurrency bounded; source hosts may share a constrained connection pool.
         gate = asyncio.Semaphore(4)
 
@@ -370,7 +371,7 @@ class SourceClient:
 
     async def list_notice_batch(self, after_id: int = 0, limit: int = 100,
                                 updated_since: float | None = None,
-                                procurement_only: bool = False) -> list[NoticeInput]:
+                                procurement_only: bool = False, progress=None) -> list[NoticeInput]:
         if isinstance(after_id, bool) or after_id < 0 or not 1 <= limit <= 1000:
             raise SourceError("批量游标或批次大小无效")
         if not self._file_database_enabled():
@@ -378,9 +379,9 @@ class SourceClient:
         if updated_since is not None and (not math.isfinite(updated_since) or updated_since < 0):
             raise SourceError("增量更新时间无效")
         return await asyncio.to_thread(self._database_notices, None, after_id, limit, updated_since,
-                                       procurement_only)
+                                       procurement_only, None, progress)
 
-    async def fetch_project_notices(self, project_keys: list[str]) -> list[NoticeInput]:
+    async def fetch_project_notices(self, project_keys: list[str], progress=None) -> list[NoticeInput]:
         if not isinstance(project_keys, list) or any(not isinstance(key, str) or not key.strip()
                                                      for key in project_keys):
             raise SourceError("项目回溯需要非空项目键数组")
@@ -391,7 +392,7 @@ class SourceClient:
             raise SourceError("单批项目回溯不能超过 1000 个项目键")
         if not self._file_database_enabled():
             raise SourceError("项目回溯需要配置 SOURCE_DB_DSN 和 SOURCE_FILE_ROOT；未猜测来源项目接口")
-        return await asyncio.to_thread(self._database_notices, None, 0, 25001, None, True, keys)
+        return await asyncio.to_thread(self._database_notices, None, 0, 25001, None, True, keys, progress)
 
     def _read_source_file(self, relative: Any, warnings: list[str], label: str) -> str:
         if not relative:
@@ -439,7 +440,7 @@ class SourceClient:
     def _database_notices(self, ids: list[int] | None, after_id: int,
                           limit: int, updated_since: float | None,
                           procurement_only: bool = False,
-                          project_keys: list[str] | None = None) -> list[NoticeInput]:
+                          project_keys: list[str] | None = None, progress=None) -> list[NoticeInput]:
         try:
             with self._connect() as connection:
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -451,6 +452,11 @@ class SourceClient:
                     "round_key", "lot_key", "related_notice_id"
                 ) if name in available]
                 # Identifiers come exclusively from the hardcoded allowlist above; values are bound.
+                project_column = "project_key_name" if "project_key_name" in available else (
+                    "project_key" if "project_key" in available else None)
+                if project_column:
+                    selected.append("(SELECT mp.channel FROM public.mv_project mp "
+                                    f"WHERE mp.project_key = notices.{project_column}) AS project_channel")
                 query = "SELECT " + ", ".join(selected) + " FROM public.notices WHERE "
                 if project_keys is not None:
                     project_column = "project_key_name" if "project_key_name" in available else (
@@ -473,6 +479,9 @@ class SourceClient:
                 query += " ORDER BY notice_id LIMIT %s"
                 params.append(limit)
                 notices = connection.execute(query, tuple(params)).fetchall()
+                if progress:
+                    progress(phase="reading_metadata", reading_scope="project" if project_keys else "batch",
+                             material_total=len(notices), material_processed=0)
                 if project_keys is not None and len(notices) > 25000:
                     raise SourceError("单批项目回溯超过 25000 条公告，请缩小项目批次或核验项目关联")
                 found = [int(row["notice_id"]) for row in notices]
@@ -516,7 +525,9 @@ class SourceClient:
             for lot in lots:
                 lots_by_notice[int(lot["notice_id"])].append(lot)
             results = []
-            for row in notices:
+            if progress:
+                progress(phase="reading_materials")
+            for index, row in enumerate(notices, 1):
                 nid = int(row["notice_id"])
                 warnings: list[str] = []
                 load_material = not procurement_only or _notice_phase(row) in PROCUREMENT_PHASES
@@ -557,6 +568,8 @@ class SourceClient:
                               description=_text(lot.get("description")))
                           for lot in lots_by_notice[nid]],
                 ))
+                if progress and (index % 10 == 0 or index == len(notices)):
+                    progress(material_processed=index)
             if ids is not None:
                 by_id = {notice.notice_id: notice for notice in results}
                 return [by_id[nid] for nid in ids]

@@ -4,6 +4,8 @@ services:
   analysis-db:
     image: ${ANALYSIS_DB_IMAGE:-af.hikvision.com.cn/docker/library/postgres:16-alpine}
     restart: unless-stopped
+    ports:
+      - "${ANALYSIS_DB_BIND_HOST:-127.0.0.1}:${ANALYSIS_DB_PORT:-55434}:5432"
     environment:
       POSTGRES_DB: bid_analysis
       POSTGRES_USER: bid_analysis
@@ -17,7 +19,7 @@ services:
       retries: 20
 
   analyzer:
-    image: bid-analysis-service:0.3.0
+    image: bid-analysis-service:0.4.0
     build:
       context: .
       args:

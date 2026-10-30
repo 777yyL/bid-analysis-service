@@ -46,11 +46,11 @@ class ProjectFlow:
     def __init__(self, cfg, ws, source, judge, scheduler):
         self.cfg, self.ws, self.source = cfg, ws, source
         self.judge, self.scheduler = TagJudge(judge), scheduler
-        self.projects = ProjectStore(ws)
+        self.projects = ProjectStore(ws, cfg.model_no_hit_sample_percent)
         ws.project_service = self.projects
         self.ingest_lock = asyncio.Lock()
 
-    async def ingest(self, notices, knowledge_id, use_model=True, priority=70, backfill=False):
+    async def ingest(self, notices, knowledge_id, use_model=True, priority=70, backfill=False, progress=None):
         async with self.ingest_lock:
             members = {n.notice_id: n for n in notices}
             keys = sorted({n.project_key for n in notices if n.project_key})
@@ -60,7 +60,8 @@ class ProjectFlow:
                 self.cfg.source_db_dsn.get_secret_value() and self.cfg.source_file_root)
             if backfill and keys and callable(fetch) and configured:
                 try:
-                    expanded = await fetch(keys)
+                    kwargs = {"progress": progress} if isinstance(self.source, SourceClient) else {}
+                    expanded = await fetch(keys, **kwargs)
                     members.update({n.notice_id: n for n in expanded})
                 except SourceError as error:
                     # Fail the synchronization batch: its cursor must not advance past a failed backtrack.
@@ -68,7 +69,9 @@ class ProjectFlow:
             elif backfill and keys:
                 warnings.append("来源未提供项目回溯通道，仅依据分析库已有公告选择主公告")
             changed, affected = 0, set()
-            for notice in members.values():
+            if progress:
+                progress(phase="saving_notices", expanded=len(members), processed=0)
+            for index, notice in enumerate(members.values(), 1):
                 with self.ws.store.session() as session:
                     previous = session.get(NoticeRow, notice.notice_id)
                     if previous and previous.project_key:
@@ -76,10 +79,18 @@ class ProjectFlow:
                 key = project_key(notice)
                 notice = notice.model_copy(update={"project_key": key})
                 affected.add(key)
-                item = self.ws.ingest(notice, knowledge_id, False, priority, record_only=True)
+                item = await asyncio.to_thread(self.ws.ingest, notice, knowledge_id, False, priority, record_only=True)
                 changed += int(item["changed"])
-            plans = [p for key in sorted(affected) for p in self.projects.refresh(
-                key, knowledge_id, use_model, priority, extra_warnings=warnings)]
+                if progress and (index % 10 == 0 or index == len(members)):
+                    progress(processed=index)
+            plans = []
+            if progress:
+                progress(phase="queueing_projects", projects=len(affected), projects_processed=0)
+            for index, key in enumerate(sorted(affected), 1):
+                plans.extend(await asyncio.to_thread(self.projects.refresh,
+                    key, knowledge_id, use_model, priority, extra_warnings=warnings))
+                if progress:
+                    progress(projects_processed=index)
             return {"received": len(notices), "expanded": len(members), "changed": changed,
                     "projects": len(affected), "analyses": plans}
 
@@ -144,6 +155,9 @@ class ProjectFlow:
                     return True
                 metrics.update(input_chars=size, rule_seconds=time.perf_counter() - started)
             else:
+                if not self.projects.route_pending_model(task):
+                    self.ws.finish_task(task, "skipped", "规则分流：本项目无需自动模型复核")
+                    return True
                 if plan["rule_revision"] != plan["revision"]:
                     self.ws.finish_task(task, "retry", "等待项目规则分析", retry_delay=2, consume_attempt=False)
                     return True

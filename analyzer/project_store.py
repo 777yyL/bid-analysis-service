@@ -79,8 +79,9 @@ def build_material(selection):
 
 
 class ProjectStore:
-    def __init__(self, ws):
+    def __init__(self, ws, no_hit_sample_percent=5):
         self.ws, self.store = ws, ws.store
+        self.no_hit_sample_percent = no_hit_sample_percent
 
     def bootstrap(self):
         if self.ws.state("project_policy_version") == POLICY_VERSION:
@@ -142,11 +143,17 @@ class ProjectStore:
                                           created_at=now, use_model=use_model, active=True)
                     s.add(plan)
                 old_primary = plan.primary_notice_id
+                previous_selection = plan.selection or {}
                 main = selection["main"]
                 plan.selection = {k: v for k, v in selection.items() if k not in ("main", "corrections")}
                 plan.selection.update(primary_title=main.title if main else "", primary_type=main.notice_type if main else "",
                     correction_notice_ids=[n.notice_id for n in selection["corrections"]],
                     policy_version=POLICY_VERSION)
+                plan.selection["model_override"] = bool(use_model and force) if changed or force else previous_selection.get("model_override", False)
+                if not changed and not force:
+                    for field in ("model_route", "model_route_reason"):
+                        if field in previous_selection:
+                            plan.selection[field] = previous_selection[field]
                 plan.primary_notice_id = main.notice_id if main else None
                 plan.input_payload = material.model_dump() if material else None
                 plan.active, plan.updated_at = True, now
@@ -169,7 +176,7 @@ class ProjectStore:
                     row = s.get(NoticeRow, main.notice_id)
                     row.analysis_status = plan.analysis_status
                     if requested_model:
-                        self._enqueue(s, plan, "model" if plan.rule_revision == revision else "rule", priority)
+                        self._enqueue(s, plan, "rule", priority)
                 if old_primary and old_primary != plan.primary_notice_id:
                     old = s.get(NoticeRow, old_primary)
                     if old:
@@ -206,6 +213,37 @@ class ProjectStore:
         with self.store.session.begin() as s:
             return self.valid(s, task) is not None
 
+    def model_route(self, plan, tags, complete):
+        if not plan.use_model:
+            return "disabled", "本项目仅执行规则分析"
+        if not (plan.input_payload or {}).get("analysis_documents"):
+            return "missing_material", "缺少可用采购需求片段，等待材料补齐"
+        if plan.selection.get("model_override"):
+            return "manual", "用户手动请求模型复核"
+        if plan.selection.get("correction_notice_ids"):
+            return "correction", "采购范围存在更正，优先复核当前有效需求"
+        if not complete or plan.selection.get("warnings") or any(t["status"] == "candidate" for t in tags):
+            return "ambiguous", "存在歧义候选、材料缺失或材料选择待核实"
+        if any(t["status"] == "confirmed" for t in tags):
+            return "rule_pass", "采购关系明确，直接采用规则标签"
+        sampled = int(digest([plan.project_key, plan.unit_key])[:8], 16) % 100 < self.no_hit_sample_percent
+        return ("sample", "无命中项目进入低优先级漏召回抽检") if sampled else (
+            "no_hit", "无有效规则命中，未抽中模型检查；不代表业务无关")
+
+    def route_pending_model(self, task):
+        """Apply the same routing to tasks queued by earlier service versions."""
+        with self.store.session.begin() as s:
+            plan = self.valid(s, task)
+            if not plan:
+                return False
+            if plan.rule_revision != plan.revision:
+                return True
+            tags = [{"status": row.status} for row in s.scalars(select(TagRow).where(
+                TagRow.notice_id == plan.primary_notice_id, TagRow.source == "rule"))]
+            route, reason = self.model_route(plan, tags, plan.material_complete)
+            plan.selection = {**plan.selection, "model_route": route, "model_route_reason": reason}
+            return route in ("manual", "correction", "ambiguous", "sample")
+
     def save_rules(self, task, result):
         with self.store.session.begin() as s:
             plan = self.valid(s, task)
@@ -221,9 +259,11 @@ class ProjectStore:
             row = s.get(NoticeRow, plan.primary_notice_id)
             row.analysis_status, row.material_complete, row.warnings = plan.analysis_status, plan.material_complete, plan.warnings
             row.updated_at = plan.updated_at = time.time()
-            if plan.use_model and (plan.input_payload or {}).get("analysis_documents"):
-                candidate = any(t["status"] == "candidate" for t in tags)
-                self._enqueue(s, plan, "model", task["priority"] + (20 if candidate else -20))
+            route, reason = self.model_route(plan, tags, plan.material_complete)
+            plan.selection = {**plan.selection, "model_route": route, "model_route_reason": reason}
+            if route in ("manual", "correction", "ambiguous", "sample"):
+                priority = -100 if route == "sample" else task["priority"] + 20
+                self._enqueue(s, plan, "model", priority)
             return True
 
     def save_model(self, task, result):
@@ -298,10 +338,11 @@ class ProjectStore:
             plans = self.analyses(s, keys)
             phases = {}
             if keys:
-                for row in s.execute(select(NoticeRow.project_key, NoticeRow.notice_type)
+                for row in s.execute(select(NoticeRow.project_key,
+                    NoticeRow.payload["project_channel"].as_string().label("project_channel"))
                     .where(NoticeRow.project_key.in_(keys))
-                    .order_by(NoticeRow.publish_at.desc().nulls_last(), NoticeRow.notice_id.desc())):
-                    phases.setdefault(row.project_key, row.notice_type)
+                    .order_by(NoticeRow.updated_at.desc(), NoticeRow.notice_id.desc())):
+                    phases.setdefault(row.project_key, row.project_channel or "")
             items = []
             for row in rows:
                 analyses = plans[row["project_key"]]
@@ -317,8 +358,8 @@ class ProjectStore:
         base = self.ws.project(key)
         with self.store.session() as s:
             analyses = self.analyses(s, [key], include_evidence=True)[key]
-            stage = s.scalar(select(NoticeRow.notice_type).where(NoticeRow.project_key == key)
-                             .order_by(NoticeRow.publish_at.desc().nulls_last(), NoticeRow.notice_id.desc()).limit(1))
+            stage = s.scalar(select(NoticeRow.payload["project_channel"].as_string()).where(NoticeRow.project_key == key)
+                             .order_by(NoticeRow.updated_at.desc(), NoticeRow.notice_id.desc()).limit(1))
         base.update(analyses=analyses, current_stage=stage or "",
                     tags=[t for a in analyses for t in a["tags"]])
         selected = {a["primary_notice_id"] for a in analyses}

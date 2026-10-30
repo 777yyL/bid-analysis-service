@@ -107,6 +107,7 @@ export function ProjectView({projectKey}: {projectKey: string}) {
           {key: 'reason', label: '选择依据', children: analysis.selection_reason || '等待选择'},
           {key: 'changes', label: '需求更正', children: analysis.correction_notice_ids?.length ? <Space direction="vertical" size={5}>{analysis.correction_notice_ids.map(id => <a key={id} onClick={() => go(`/notices/${id}`)}>{titleOf(id)} <span className="mono">#{id}</span></a>)}</Space> : '无已纳入的需求更正'},
           {key: 'ignored', label: '未纳入的更正', children: analysis.ignored_correction_ids?.length ? <Space wrap>{analysis.ignored_correction_ids.map(id => <a key={id} onClick={() => go(`/notices/${id}`)}>#{id}</a>)}<span className="muted">仅涉及流程或未满足本次关联条件</span></Space> : '无'},
+          {key: 'model-routing', label: '模型分流', children: analysis.model_route_reason || '等待规则分析或旧结果尚未分流'},
           {key: 'version', label: '需求版本', children: <span className="mono small">{analysis.revision?.slice(0, 16) || '尚未生成'} · {dateTime(analysis.updated_at)}</span>}
         ]}/>
         {!!analysis.warnings?.length && <Alert className="selection-warnings" type="warning" showIcon message="选择或材料提示" description={analysis.warnings.join('；')}/>}

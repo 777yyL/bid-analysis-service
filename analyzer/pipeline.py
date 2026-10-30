@@ -138,12 +138,21 @@ class Pipeline:
 
     async def sync_batch(self, mode="history", page=1, page_size=100, use_model=True):
         async with self.sync_lock:
+            progress = {"started_at": time.time(), "page_size": page_size}
+            def report(**values):
+                previous_phase = progress.get("phase")
+                progress.update(values, updated_at=time.time())
+                self.ws.set_state("sync_progress:" + mode, progress)
+                if previous_phase != progress["phase"] or "last_count" in values:
+                    logger.info("source sync mode=%s phase=%s received=%s processed=%s", mode,
+                        progress["phase"], progress.get("received", 0), progress.get("processed", 0))
+            report(phase="reading_source")
             key = self.ws.store.active_knowledge_id()
             if not key:
                 raise ValueError("请先导入或同步词库")
             if mode == "page":
                 ids = await self.source.list_notice_ids(page, page_size)
-                kwargs = {"procurement_only": True} if isinstance(self.source, SourceClient) else {}
+                kwargs = {"procurement_only": True, "progress": report} if isinstance(self.source, SourceClient) else {}
                 notices = await self.source.fetch_notice_batch(ids, **kwargs)
                 cursor = None
             else:
@@ -155,10 +164,11 @@ class Pipeline:
                     since = time.time() - self.cfg.incremental_lookback_seconds
                     state["since"] = since
                     state["sweep_started"] = time.time()
-                kwargs = {"procurement_only": True} if isinstance(self.source, SourceClient) else {}
+                kwargs = {"procurement_only": True, "progress": report} if isinstance(self.source, SourceClient) else {}
                 notices = await self.source.list_notice_batch(cursor, page_size, since, **kwargs)
             priority = 100 if mode in ("page", "incremental") else 30
-            ingested = await self.project_flow.ingest(notices, key, use_model, priority, backfill=True)
+            report(phase="project_backtrack", received=len(notices), processed=0)
+            ingested = await self.project_flow.ingest(notices, key, use_model, priority, backfill=True, progress=report)
             changed = ingested["changed"]
             if mode != "page":
                 state["cursor"] = max([cursor, *[n.notice_id for n in notices]])
@@ -172,6 +182,9 @@ class Pipeline:
                         state["complete"] = True
                         self.ws.set_state("history_enabled", False)
                 self.ws.set_state("sync:" + mode, state)
+            report(phase="batch_completed" if notices else "idle", last_count=len(notices),
+                   expanded=ingested["expanded"], projects=ingested["projects"],
+                   cursor=state["cursor"] if mode != "page" else None)
             return {"received": len(notices), "changed": changed, "cursor": cursor,
                     "mode": mode, "knowledge_id": key}
 
@@ -221,7 +234,8 @@ class Pipeline:
                         try:
                             use_model = self.ws.state(mode + "_use_model", self.ws.state("incremental_use_model", True)
                                                       if mode == "compensation" else True)
-                            result = await self.sync_batch(mode, page_size=self.cfg.sync_batch_size, use_model=use_model)
+                            batch_size = self.ws.state(mode + "_page_size", self.cfg.sync_batch_size)
+                            result = await self.sync_batch(mode, page_size=batch_size, use_model=use_model)
                             if mode == "incremental" and not result["received"]:
                                 next_incremental = time.time() + self.cfg.sync_interval_seconds
                             self.ws.set_state("sync_error:" + mode, None)
@@ -232,9 +246,15 @@ class Pipeline:
                         except (SourceError, ValueError) as error:
                             self.ws.set_state("sync_error:" + mode, str(error))
                             next_retry[mode] = time.time() + max(30, self.cfg.sync_interval_seconds)
+                            self.ws.set_state("sync_progress:" + mode, {**self.ws.state("sync_progress:" + mode, {}),
+                                "phase": "retry", "updated_at": time.time(), "next_retry_at": next_retry[mode]})
+                            logger.warning("source sync mode=%s failed: %s", mode, error)
                         except Exception:
                             self.ws.set_state("sync_error:" + mode, "同步失败，请检查源连接及服务日志")
                             next_retry[mode] = time.time() + max(30, self.cfg.sync_interval_seconds)
+                            self.ws.set_state("sync_progress:" + mode, {**self.ws.state("sync_progress:" + mode, {}),
+                                "phase": "retry", "updated_at": time.time(), "next_retry_at": next_retry[mode]})
+                            logger.exception("source sync mode=%s failed", mode)
             reindex = self.ws.state("reindex", {})
             busy = self.ws.state("history_enabled", False) or reindex.get("enabled")
             delay = 0.2 if busy and not self.scheduler()["paused"] else self.cfg.sync_interval_seconds

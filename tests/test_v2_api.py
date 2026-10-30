@@ -49,6 +49,21 @@ def test_product_lexicon_survives_business_sync(tmp_path):
         assert any(t["dimension"] == "product" for t in trial["tags"])
 
 
+def test_history_sync_exposes_pause_and_persists_requested_batch_size(tmp_path):
+    cfg = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'sync-api.db'}",
+        analyzer_api_key="test", source_db_dsn="postgresql://readonly@db/bidinfo", source_file_root="/source-data")
+    with TestClient(create_app(cfg)) as client:
+        h = {"X-API-Key": "test"}
+        client.post("/api/v2/demo", headers=h)
+        client.post("/api/v2/tasks/control", headers=h, json={"paused": True})
+        response = client.post("/api/v2/sync", headers=h, json={"mode": "history", "page_size": 7})
+        assert response.status_code == 200
+        assert response.json()["paused"] is True
+        stream = client.get("/api/v2/overview", headers=h).json()["sync"]["history"]
+        assert stream["page_size"] == 7
+        assert stream["phase"] == "paused"
+
+
 def test_removed_keyword_does_not_trap_manual_label(tmp_path):
     cfg = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'api.db'}",
                    analyzer_api_key="test", worker_enabled=False)

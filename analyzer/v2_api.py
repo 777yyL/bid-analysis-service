@@ -73,11 +73,19 @@ def router(cfg, ws, pipeline, auth):
 
     @api.get("/overview")
     async def overview():
+        def sync_state(mode):
+            enabled = ws.state(mode + "_enabled", cfg.incremental_enabled if mode == "incremental" else False)
+            saved = ws.state("sync:" + mode, {})
+            progress = ws.state("sync_progress:" + mode, {})
+            phase = "paused" if enabled and pipeline.scheduler()["paused"] else (
+                progress.get("phase", "waiting") if enabled else "completed" if saved.get("complete") else "stopped")
+            return {**saved, **progress, "enabled": enabled, "phase": phase,
+                    "page_size": ws.state(mode + "_page_size", cfg.sync_batch_size),
+                    "error": ws.state("sync_error:" + mode)}
         return {**ws.overview(), **pipeline.project_flow.projects.stats(), "scheduler": pipeline.scheduler(),
                 "knowledge_id": ws.store.active_knowledge_id(),
-                "sync": {mode: {**ws.state("sync:" + mode, {}),
-                                "enabled": ws.state(mode + "_enabled", False),
-                                "error": ws.state("sync_error:" + mode)}
+                "model_routing": {"no_hit_sample_percent": cfg.model_no_hit_sample_percent},
+                "sync": {mode: sync_state(mode)
                          for mode in ("history", "incremental", "compensation", "reindex")}}
 
     @api.get("/notices/export.csv")
@@ -216,15 +224,19 @@ def router(cfg, ws, pipeline, auth):
     async def sync(payload: SyncInput):
         knowledge()
         if payload.mode != "page":
+            if payload.enabled and not cfg.worker_enabled:
+                raise HTTPException(409, "WORKER_ENABLED=false，后台同步未启动；请启用 worker 后重试")
             if not (cfg.source_file_root and cfg.source_db_dsn.get_secret_value()):
                 raise HTTPException(409, "历史/增量同步需要 SOURCE_DB_DSN 与 SOURCE_FILE_ROOT；也可分页同步")
             ws.set_state(payload.mode + "_enabled", payload.enabled)
             ws.set_state(payload.mode + "_use_model", payload.use_model)
+            ws.set_state(payload.mode + "_page_size", payload.limit or payload.page_size)
             if payload.enabled and payload.mode == "history":
                 state = ws.state("sync:history", {})
                 if state.get("complete"):
                     ws.set_state("sync:history", {"cursor": 0})
-            return {"mode": payload.mode, "enabled": payload.enabled}
+            return {"mode": payload.mode, "enabled": payload.enabled, "paused": pipeline.scheduler()["paused"],
+                    "page_size": payload.limit or payload.page_size}
         try:
             return await pipeline.sync_batch("page", payload.page, payload.limit or payload.page_size,
                                              payload.use_model)

@@ -5,7 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 root = Path(__file__).resolve().parent.parent
-target = root / "dist" / "bid-analysis-service-0.3.0.zip"
+target = root / "dist" / "bid-analysis-service-0.4.0.zip"
 ui = root / "frontend" / "dist" / "index.html"
 if not ui.is_file():
     raise SystemExit("Build frontend first: cd frontend && npm ci && npm run build")

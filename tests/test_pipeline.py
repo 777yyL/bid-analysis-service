@@ -84,6 +84,7 @@ async def test_incremental_sweep_preserves_cursor_and_freezes_lower_bound(tmp_pa
     calls = []
     class Source:
         async def list_notice_batch(self, after_id, limit, updated_since):
+            assert ws.state("sync_progress:incremental")["phase"] == "reading_source"
             calls.append((after_id, updated_since))
             return [NoticeInput(notice_id=12, title="采购", body="正文")] if not after_id else []
     pipeline = Pipeline(cfg, ws, Source(), None)
@@ -93,6 +94,8 @@ async def test_incremental_sweep_preserves_cursor_and_freezes_lower_bound(tmp_pa
     assert calls[1][0] == 12
     assert calls[0][1] == calls[1][1]
     assert ws.state("sync:incremental")["cursor"] == 0
+    assert ws.state("sync_progress:incremental")["phase"] == "idle"
+    assert ws.state("sync_progress:incremental")["last_count"] == 0
     store.close()
 
 
@@ -128,4 +131,28 @@ async def test_reindex_transient_failure_recovers_and_clears_error(tmp_path, mon
     assert len(calls) == 2
     assert not ws.state("reindex")["enabled"]
     assert ws.state("sync_error:reindex") is None
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_history_loop_uses_persisted_batch_size(tmp_path, monkeypatch):
+    cfg = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'batch.db'}")
+    store = Store(cfg.database_url)
+    store.initialize()
+    ws = Workspace(store)
+    store.save_knowledge(KnowledgeInput(version="v1"))
+    ws.set_state("history_enabled", True)
+    ws.set_state("history_page_size", 7)
+    calls = []
+    class Source:
+        async def list_notice_batch(self, cursor, limit, since):
+            calls.append(limit)
+            return []
+    async def stop(_):
+        raise asyncio.CancelledError
+    monkeypatch.setattr("analyzer.pipeline.asyncio.sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await Pipeline(cfg, ws, Source(), None)._sync_loop()
+    assert calls == [7]
+    assert ws.state("sync:history")["complete"]
     store.close()

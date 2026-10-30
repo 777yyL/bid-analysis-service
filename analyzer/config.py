@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_json_mode: bool = True
     llm_timeout_seconds: float = Field(default=120, gt=0, le=600)
     llm_rpm: int = Field(default=5, ge=1)
+    model_no_hit_sample_percent: int = Field(default=5, ge=0, le=100)
     llm_tpm: int = Field(default=0, ge=0)
     llm_max_output_tokens: int = Field(default=3000, ge=256, le=32000)
     llm_max_input_chars: int = Field(default=28000, ge=2000)

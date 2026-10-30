@@ -19,6 +19,7 @@ class ProjectDatabase:
     def __init__(self, notices, attachments=(), project_column="project_key_name"):
         self.notices, self.attachments = notices, attachments
         self.project_column, self.queries = project_column, []
+        self.projects = []
 
     def __enter__(self):
         return self
@@ -39,7 +40,8 @@ class ProjectDatabase:
             return Rows([{"table_name": table, "column_name": name}
                          for table, names in columns.items() for name in names])
         if "FROM public.notices" in query:
-            return Rows(self.notices)
+            phases = {row["project_key"]: row["channel"] for row in self.projects}
+            return Rows([{**row, "project_channel": phases.get(row.get(self.project_column))} for row in self.notices])
         if "FROM public.attachments" in query:
             return Rows([a for a in self.attachments if a["notice_id"] in params[0]])
         return Rows([])
@@ -63,6 +65,7 @@ async def test_result_project_backtracks_purchase_and_never_opens_result_materia
          "extract_status": "partial"},
         {"att_id": 31, "notice_id": 30, "filename": "结果.pdf", "text_path": "result-never-read.mineru.txt",
          "extract_status": "ok"}])
+    database.projects = [{"project_key": "p'1", "channel": "验收公告"}]
     monkeypatch.setattr("analyzer.source.psycopg.connect", lambda *a, **kw: database)
     source = SourceClient(cfg(tmp_path))
     opened = []
@@ -72,13 +75,19 @@ async def test_result_project_backtracks_purchase_and_never_opens_result_materia
         assert not path.startswith("result-")
         return original(path, warnings, label)
     monkeypatch.setattr(source, "_read_source_file", read)
+    progress = []
     try:
-        notices = await source.fetch_project_notices(["p'1"])
+        notices = await source.fetch_project_notices(["p'1"], progress=lambda **values: progress.append(values))
     finally:
         await source.aclose()
     assert [n.notice_id for n in notices] == [10, 30]
     assert notices[0].body == "采购交换机10台"
     assert notices[0].notice_type == "采购公告"
+    assert notices[0].project_channel == "验收公告"
+    assert notices[1].project_channel == "验收公告"
+    project_query = next(q for q, p in database.queries if "FROM public.notices" in q)
+    assert "SELECT mp.channel FROM public.mv_project mp" in project_query
+    assert "mp.project_key = notices.project_key_name" in project_query
     assert notices[0].attachments[0].text == "交换机技术清单"
     assert notices[0].round_key == "2" and notices[0].lot_key == "A"
     assert notices[1].body == "" and notices[1].attachments == []
@@ -90,6 +99,8 @@ async def test_result_project_backtracks_purchase_and_never_opens_result_materia
     attachment_params = next(p for q, p in database.queries if "FROM public.attachments" in q)
     assert attachment_params == ([10],)
     assert opened == ["purchase.md", "purchase.mineru.txt"]
+    assert any(p.get("phase") == "reading_materials" for p in progress)
+    assert progress[-1]["material_processed"] == 2
 
 
 @pytest.mark.asyncio

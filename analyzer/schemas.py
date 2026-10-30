@@ -87,6 +87,7 @@ class AnalysisDocument(StrictModel):
 
 
 class NoticeInput(StrictModel):
+    project_channel: str | None = Field(default=None, max_length=100)
     notice_id: int = Field(gt=0)
     title: str = Field(min_length=1)
     buyer: str = ""

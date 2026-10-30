@@ -3,7 +3,7 @@ import {Alert, Button, Empty, Skeleton, Space, Tag as Pill, Tooltip} from 'antd'
 import {ReloadOutlined} from '@ant-design/icons';
 import {api} from './api';
 import type {Tag} from './types';
-export const statusText: Record<string, string> = {confirmed: '已确认', candidate: '候选', excluded: '已排除', queued: '排队中', running: '处理中', retry: '等待重试', ready: '规则完成', completed: '模型完成', needs_review: '待复核', failed: '失败', pending: '待处理', rule_done: '规则完成', model_pending: '待模型复核', model_done: '模型完成', context_only: '仅更新进展', unselected: '未选作分析材料', not_selected: '未选作分析材料', missing_primary: '缺少采购分析材料', missing_material: '采购材料待补齐', stale: '版本已过期'};
+export const statusText: Record<string, string> = {confirmed: '已确认', candidate: '候选', excluded: '已排除', queued: '排队中', running: '处理中', retry: '等待重试', ready: '规则完成', completed: '模型完成', needs_review: '待复核', failed: '失败', pending: '待处理', rule_done: '规则完成', model_pending: '待模型复核', model_done: '模型完成', context_only: '仅更新进展', unselected: '未选作分析材料', not_selected: '未选作分析材料', missing_primary: '缺少采购分析材料', missing_material: '采购材料待补齐', stale: '版本已过期', skipped: '规则分流已跳过'};
 export const sourceText: Record<string, string> = {rule: '规则', model: '模型', manual: '人工'};
 export function dateTime(value?: number | string) {
   if (!value) return '—';
