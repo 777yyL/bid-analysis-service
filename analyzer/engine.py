@@ -46,7 +46,8 @@ def prepare(notice: NoticeInput, knowledge: KnowledgeInput, settings: Settings) 
         source = f"attachment:{attachment.att_id}:{attachment.filename}"
         originals.append((source, attachment.text))
         routing.append((f"summary:{source}", attachment.summary))
-        if not attachment.text.strip() or attachment.extract_status not in (None, "ok"):
+        if (not attachment.text.strip() or attachment.extract_status not in (None, "ok")
+                or attachment.text_truncated):
             complete = False
             warnings.append(f"附件 {attachment.att_id} 缺少完整抽取文本")
     size = sum(len(text) for _, text in [*originals, *routing])

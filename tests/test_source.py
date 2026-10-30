@@ -24,6 +24,26 @@ async def test_bare_array_keyword_pages_are_not_mistaken_for_total_count():
     assert any(kw.word == "最后一个采购词" for kw in kb.keywords)
 
 
+@pytest.mark.asyncio
+async def test_truncated_api_text_is_usable_but_never_cached_as_complete():
+    count = []
+    def respond(request):
+        if request.url.path.endswith("/text"):
+            count.append(request.url.path)
+            return httpx.Response(200, json={"exists": True, "chars": 5000,
+                "text": "采购清单：交换机10台", "truncated": True, "error": None})
+        return httpx.Response(200, json={"notice_id": 1, "title": "采购", "body": "详见清单",
+            "attachments": [{"att_id": 9, "sha256": "c" * 64, "extract_status": "ok"}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        source = SourceClient(settings(), MemoryCache(), http)
+        first = await source.fetch_notice(1)
+        await source.fetch_notice(1)
+    assert first.attachments[0].text == "采购清单：交换机10台"
+    assert first.attachments[0].text_truncated
+    assert any("截断" in warning for warning in first.warnings)
+    assert len(count) == 2
+
+
 @pytest.mark.parametrize("status", [429, 503])
 async def test_temporary_attachment_failure_propagates_to_durable_retry(status):
     def handler(request):

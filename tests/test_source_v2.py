@@ -139,3 +139,53 @@ async def test_skipped_duplicate_reuses_readable_sha_copy(tmp_path, monkeypatch)
     assert result[0].attachments[0].text == "采购摄像机 20 台"
     assert result[0].attachments[0].extract_status == "ok"
     assert not result[0].warnings
+
+
+@pytest.mark.asyncio
+async def test_mineru_text_is_read_even_when_extraction_not_ok(tmp_path, monkeypatch):
+    from analyzer.schemas import KnowledgeInput, ProductKeyword
+    from analyzer.tagging import analyze_tags
+    path = tmp_path / "attachments/2026/10/5d/hash/中小企业声明函.png.mineru.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("采购清单：交换机10台。", encoding="utf-8")
+    (tmp_path / "body.md").write_text("本次采购见附件。", encoding="utf-8")
+    database = Database([{"notice_id": 1, "title": "采购", "content_path": "body.md"}],
+        [{"att_id": 9, "notice_id": 1, "text_path": path.relative_to(tmp_path).as_posix(),
+          "extract_status": "partial", "sha256": "a" * 64}])
+    monkeypatch.setattr("analyzer.source.psycopg.connect", lambda *a, **kw: database)
+    source = SourceClient(cfg(tmp_path))
+    try:
+        notice = (await source.fetch_notice_batch([1]))[0]
+    finally:
+        await source.aclose()
+    assert notice.attachments[0].text == "采购清单：交换机10台。"
+    assert notice.attachments[0].extract_status == "partial"
+    result = analyze_tags(notice, KnowledgeInput(version="v1", product_keywords=[
+        ProductKeyword(category="网络产品", word="交换机")]))
+    assert any(t["label"] == "交换机" for t in result["tags"])
+    assert not result["material_complete"]
+
+
+@pytest.mark.asyncio
+async def test_missing_ok_file_can_reuse_partial_sha_copy(tmp_path, monkeypatch):
+    (tmp_path / "body.md").write_text("采购公告", encoding="utf-8")
+    (tmp_path / "copy.mineru.txt").write_text("采购摄像机20台", encoding="utf-8")
+    class Copies(Database):
+        def execute(self, query, params=None):
+            if "sha256 = ANY" in query:
+                assert "AND extract_status = 'ok'" not in query
+                return Rows([{"sha256": "a" * 64, "text_path": "copy.mineru.txt",
+                              "extract_status": "partial"}])
+            return super().execute(query, params)
+    database = Copies([{"notice_id": 1, "title": "采购", "content_path": "body.md"}],
+        [{"att_id": 9, "notice_id": 1, "sha256": "a" * 64,
+          "text_path": "missing.txt", "extract_status": "ok"}])
+    monkeypatch.setattr("analyzer.source.psycopg.connect", lambda *a, **kw: database)
+    source = SourceClient(cfg(tmp_path))
+    try:
+        notice = (await source.fetch_notice_batch([1]))[0]
+    finally:
+        await source.aclose()
+    assert notice.attachments[0].text == "采购摄像机20台"
+    assert notice.attachments[0].extract_status == "partial"
+    assert notice.warnings

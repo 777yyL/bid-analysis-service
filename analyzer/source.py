@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -31,6 +32,13 @@ class SourceError(Exception):
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class AttachmentText:
+    text: str
+    truncated: bool = False
+    read_error: bool = False
 
 
 def _text(value: Any) -> str:
@@ -201,18 +209,22 @@ class SourceClient:
                     return _plain(envelope[key])
         return ""
 
-    async def _attachment_text(self, att_id: int) -> str:
+    async def _attachment_text(self, att_id: int) -> AttachmentText:
         data, content_type = await self._get(
             self.settings.source_attachment_path.format(att_id=att_id))
         try:
             if "json" in content_type:
                 envelopes = _envelopes(json.loads(data))
+                truncated = any(e.get("truncated") is True for e in envelopes)
+                read_error = any(bool(e.get("error")) or e.get("exists") is False for e in envelopes)
+                if any(e.get("exists") is False for e in envelopes):
+                    return AttachmentText("", truncated, True)
                 for envelope in reversed(envelopes):
                     for key in ("text", "content", "body"):
                         if isinstance(envelope.get(key), str):
-                            return _plain(envelope[key])
+                            return AttachmentText(_plain(envelope[key]), truncated, read_error)
                 raise SourceError("附件文本接口 JSON 缺少 text/content 字段")
-            return _plain(data.decode("utf-8-sig"))
+            return AttachmentText(_plain(data.decode("utf-8-sig")))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise SourceError("附件文本不是有效 UTF-8 或 JSON") from None
 
@@ -247,14 +259,17 @@ class SourceClient:
                 raise SourceError("来源详情包含冲突的重复 att_id")
             seen_ids.add(att_id)
             sha = _text(row.get("sha256")).strip().lower() or None
-            cache_key = f"source-text-v1:{self.settings.source_base_url.rstrip('/')}:{sha}" if sha else None
+            cache_key = f"source-text-v2:{self.settings.source_base_url.rstrip('/')}:{sha}" if sha else None
             text = self.text_cache.get_text(cache_key) if self.text_cache and cache_key else None
             complete = bool(text)
+            truncated, read_error = False, False
             if not text:
                 transient_error = None
                 try:
-                    text = await self._attachment_text(att_id)
-                    complete = row.get("extract_status") in (None, "ok") and bool(text)
+                    parsed = await self._attachment_text(att_id)
+                    text, truncated, read_error = parsed.text, parsed.truncated, parsed.read_error
+                    complete = (row.get("extract_status") in (None, "ok") and bool(text)
+                                and not truncated and not read_error)
                 except SourceError as error:
                     text = ""
                     if error.retryable:
@@ -263,8 +278,9 @@ class SourceClient:
                     try:
                         duplicate_id = await asyncio.to_thread(self._find_duplicate, sha, att_id)
                         if duplicate_id is not None:
-                            text = await self._attachment_text(duplicate_id)
-                            complete = bool(text)
+                            parsed = await self._attachment_text(duplicate_id)
+                            text, truncated, read_error = parsed.text, parsed.truncated, parsed.read_error
+                            complete = bool(text) and not truncated and not read_error
                     except SourceError as error:
                         if error.retryable:
                             transient_error = error
@@ -276,10 +292,14 @@ class SourceClient:
             if not text:
                 warnings.append(f"附件 {att_id} 缺少可读文本")
             elif not complete:
-                warnings.append(f"附件 {att_id} 文本解析状态不是完整成功")
+                warnings.append(f"附件 {att_id} 文本或解析状态尚未确认完整")
+            if truncated:
+                warnings.append(f"附件 {att_id} 接口文本已截断；请配置本地文件读取获取完整文本")
+            if read_error:
+                warnings.append(f"附件 {att_id} 接口报告文本读取异常")
             attachments.append(Attachment(
                 att_id=att_id, filename=_text(row.get("filename")), sha256=sha,
-                text=text or "", summary=_text(row.get("summary")),
+                text=text or "", text_truncated=truncated, summary=_text(row.get("summary")),
                 extract_status="ok" if complete else row.get("extract_status"),
             ))
         try:
@@ -400,7 +420,7 @@ class SourceClient:
                     raise SourceError("请求的部分来源公告不存在，未静默跳过")
                 attachments: list[dict] = []
                 lots: list[dict] = []
-                duplicate_paths: dict[str, list[str]] = {}
+                duplicate_paths: dict[str, list[tuple[str, str | None]]] = {}
                 if found:
                     for table, fields, target in (
                         ("attachments", ("att_id", "notice_id", "filename", "sha256", "text_path",
@@ -415,16 +435,16 @@ class SourceClient:
                             "SELECT " + ", ".join(fields_present) + f" FROM public.{table} "
                             "WHERE notice_id = ANY(%s)", (found,)
                         ).fetchall())
-                    hashes = list({att["sha256"] for att in attachments if att.get("sha256")
-                                   and (not att.get("text_path") or att.get("extract_status") != "ok")})
+                    hashes = list({att["sha256"] for att in attachments if att.get("sha256")})
                     if hashes and "sha256" in columns["attachments"]:
                         copies = connection.execute(
-                            "SELECT sha256, text_path FROM public.attachments "
-                            "WHERE sha256 = ANY(%s) AND extract_status = 'ok' "
-                            "AND text_path IS NOT NULL ORDER BY att_id", (hashes,)
+                            "SELECT sha256, text_path, extract_status FROM public.attachments "
+                            "WHERE sha256 = ANY(%s) AND text_path IS NOT NULL "
+                            "ORDER BY CASE WHEN extract_status = 'ok' THEN 0 ELSE 1 END, att_id", (hashes,)
                         ).fetchall()
                         for copy in copies:
-                            duplicate_paths.setdefault(copy["sha256"], []).append(copy["text_path"])
+                            duplicate_paths.setdefault(copy["sha256"], []).append(
+                                (copy["text_path"], copy.get("extract_status")))
             attachments_by_notice, lots_by_notice = defaultdict(list), defaultdict(list)
             for att in attachments:
                 attachments_by_notice[int(att["notice_id"])].append(att)
@@ -444,10 +464,10 @@ class SourceClient:
                     att_text = self._read_source_file(att.get("text_path"), att_warnings, f"附件 {att_id}")
                     extraction = att.get("extract_status")
                     if not att_text:
-                        for copy_path in duplicate_paths.get(att.get("sha256"), []):
+                        for copy_path, copy_status in duplicate_paths.get(att.get("sha256"), []):
                             att_text = self._read_source_file(copy_path, [], f"附件 {att_id}")
                             if att_text:
-                                extraction = "ok"
+                                extraction = copy_status or "unknown"
                                 att_warnings = []
                                 break
                     warnings.extend(att_warnings)

@@ -196,7 +196,8 @@ def analyze_tags(notice: NoticeInput, knowledge: KnowledgeInput,
     if not notice.body.strip():
         warnings.append("缺少公告正文，不能视为完整材料")
     for attachment in notice.attachments:
-        if not attachment.text.strip() or attachment.extract_status not in (None, "ok"):
+        if (not attachment.text.strip() or attachment.extract_status not in (None, "ok")
+                or attachment.text_truncated):
             complete = False
             warnings.append(f"附件 {attachment.att_id} 缺少完整抽取文本")
     return {"tags": tags, "material_complete": complete,

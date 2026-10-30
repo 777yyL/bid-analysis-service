@@ -65,6 +65,7 @@ class Attachment(StrictModel):
     filename: str = ""
     sha256: str | None = None
     text: str = ""
+    text_truncated: bool = False
     summary: str = ""
     extract_status: str | None = None
 
