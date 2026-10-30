@@ -41,6 +41,26 @@ class AttachmentText:
     read_error: bool = False
 
 
+PROCUREMENT_PHASES = frozenset(("采购公告", "采购意向", "更正公告"))
+WORKFLOW_PHASES = PROCUREMENT_PHASES | frozenset(("结果公告", "合同公告", "废标终止", "验收公告", "其他"))
+
+
+def _notice_phase(row: dict) -> str:
+    # channel is the source's eight-stage lifecycle; notice_type is a separate 19-value type.
+    channel = _text(row.get("channel")).strip()
+    return channel if channel in WORKFLOW_PHASES else _text(row.get("notice_type") or channel).strip()
+
+
+def _selection_metadata(row: dict) -> dict:
+    return {
+        "round_key": _text(row.get("round_key")).strip() or None,
+        "lot_key": _text(row.get("lot_key")).strip() or None,
+        "related_notice_id": _positive_id(row["related_notice_id"], "related_notice_id")
+        if row.get("related_notice_id") is not None else None,
+        "revoke_status": _text(row.get("revoke_status")) or "active",
+    }
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -228,10 +248,10 @@ class SourceClient:
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise SourceError("附件文本不是有效 UTF-8 或 JSON") from None
 
-    async def fetch_notice(self, notice_id: int) -> NoticeInput:
+    async def fetch_notice(self, notice_id: int, procurement_only: bool = False) -> NoticeInput:
         notice_id = _positive_id(notice_id, "notice_id")
         if self._file_database_enabled():
-            return (await self.fetch_notice_batch([notice_id]))[0]
+            return (await self.fetch_notice_batch([notice_id], procurement_only=procurement_only))[0]
         payload = await self._json(self.settings.source_notice_path.format(notice_id=notice_id))
         envelopes = _envelopes(payload)
         metadata = {}
@@ -243,6 +263,17 @@ class SourceClient:
         title = _text(metadata.get("title")).strip()
         if not title:
             raise SourceError("来源公告缺少标题")
+        if procurement_only and _notice_phase(metadata) not in PROCUREMENT_PHASES:
+            try:
+                return NoticeInput(
+                    notice_id=notice_id, title=title, buyer=_text(metadata.get("buyer")),
+                    notice_type=_notice_phase(metadata),
+                    project_key=metadata.get("project_key_name") or metadata.get("project_key"),
+                    publish_at=metadata.get("publish_at") or None, material_loaded=False,
+                    **_selection_metadata(metadata),
+                )
+            except ValidationError:
+                raise SourceError("来源公告元数据不符合分析输入契约") from None
         warnings = []
         body = self._body(envelopes)
         if not body:
@@ -305,11 +336,11 @@ class SourceClient:
         try:
             return NoticeInput(
                 notice_id=notice_id, title=title, buyer=_text(metadata.get("buyer")),
-                notice_type=_text(metadata.get("notice_type") or metadata.get("channel")),
+                notice_type=_notice_phase(metadata),
                 project_key=metadata.get("project_key_name") or metadata.get("project_key"),
                 publish_at=metadata.get("publish_at") or None,
                 body=body, scope_summary=_text(metadata.get("scope_summary")), lots=lots,
-                attachments=attachments, warnings=warnings,
+                attachments=attachments, warnings=warnings, **_selection_metadata(metadata),
             )
         except ValidationError:
             raise SourceError("来源公告字段不符合分析输入契约") from None
@@ -318,32 +349,49 @@ class SourceClient:
         return bool(self.settings.source_db_dsn.get_secret_value()
                     and getattr(self.settings, "source_file_root", ""))
 
-    async def fetch_notice_batch(self, notice_ids: list[int]) -> list[NoticeInput]:
+    async def fetch_notice_batch(self, notice_ids: list[int],
+                                 procurement_only: bool = False) -> list[NoticeInput]:
         ids = list(dict.fromkeys(_positive_id(value, "notice_id") for value in notice_ids))
         if not ids:
             return []
         if len(ids) > 1000:
             raise SourceError("单批公告不能超过 1000 条")
         if self._file_database_enabled():
-            return await asyncio.to_thread(self._database_notices, ids, 0, len(ids), None)
+            return await asyncio.to_thread(self._database_notices, ids, 0, len(ids), None,
+                                           procurement_only)
         # Keep API concurrency bounded; source hosts may share a constrained connection pool.
         gate = asyncio.Semaphore(4)
 
         async def fetch(nid):
             async with gate:
-                return await self.fetch_notice(nid)
+                return await self.fetch_notice(nid, procurement_only=procurement_only)
 
         return list(await asyncio.gather(*(fetch(nid) for nid in ids)))
 
     async def list_notice_batch(self, after_id: int = 0, limit: int = 100,
-                                updated_since: float | None = None) -> list[NoticeInput]:
+                                updated_since: float | None = None,
+                                procurement_only: bool = False) -> list[NoticeInput]:
         if isinstance(after_id, bool) or after_id < 0 or not 1 <= limit <= 1000:
             raise SourceError("批量游标或批次大小无效")
         if not self._file_database_enabled():
             raise SourceError("游标批量同步需要配置 SOURCE_DB_DSN 和 SOURCE_FILE_ROOT；接口来源请使用分页同步")
         if updated_since is not None and (not math.isfinite(updated_since) or updated_since < 0):
             raise SourceError("增量更新时间无效")
-        return await asyncio.to_thread(self._database_notices, None, after_id, limit, updated_since)
+        return await asyncio.to_thread(self._database_notices, None, after_id, limit, updated_since,
+                                       procurement_only)
+
+    async def fetch_project_notices(self, project_keys: list[str]) -> list[NoticeInput]:
+        if not isinstance(project_keys, list) or any(not isinstance(key, str) or not key.strip()
+                                                     for key in project_keys):
+            raise SourceError("项目回溯需要非空项目键数组")
+        keys = list(dict.fromkeys(key.strip() for key in project_keys))
+        if not keys:
+            return []
+        if len(keys) > 1000:
+            raise SourceError("单批项目回溯不能超过 1000 个项目键")
+        if not self._file_database_enabled():
+            raise SourceError("项目回溯需要配置 SOURCE_DB_DSN 和 SOURCE_FILE_ROOT；未猜测来源项目接口")
+        return await asyncio.to_thread(self._database_notices, None, 0, 25001, None, True, keys)
 
     def _read_source_file(self, relative: Any, warnings: list[str], label: str) -> str:
         if not relative:
@@ -389,7 +437,9 @@ class SourceClient:
         return columns
 
     def _database_notices(self, ids: list[int] | None, after_id: int,
-                          limit: int, updated_since: float | None) -> list[NoticeInput]:
+                          limit: int, updated_since: float | None,
+                          procurement_only: bool = False,
+                          project_keys: list[str] | None = None) -> list[NoticeInput]:
         try:
             with self._connect() as connection:
                 connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -397,13 +447,21 @@ class SourceClient:
                 available = columns["notices"]
                 selected = [name for name in (
                     "notice_id", "title", "buyer", "notice_type", "channel", "project_key_name",
-                    "project_key", "scope_summary", "content_path", "revoke_status", "publish_at"
+                    "project_key", "scope_summary", "content_path", "revoke_status", "publish_at",
+                    "round_key", "lot_key", "related_notice_id"
                 ) if name in available]
                 # Identifiers come exclusively from the hardcoded allowlist above; values are bound.
                 query = "SELECT " + ", ".join(selected) + " FROM public.notices WHERE "
-                if ids is not None:
+                if project_keys is not None:
+                    project_column = "project_key_name" if "project_key_name" in available else (
+                        "project_key" if "project_key" in available else None)
+                    if project_column is None:
+                        raise SourceError("来源 notices 缺少项目关联键，无法按项目回溯")
+                    query += project_column + " = ANY(%s)"
+                    params: list[Any] = [project_keys]
+                elif ids is not None:
                     query += "notice_id = ANY(%s)"
-                    params: list[Any] = [ids]
+                    params = [ids]
                 else:
                     query += "notice_id > %s"
                     params = [after_id]
@@ -415,7 +473,11 @@ class SourceClient:
                 query += " ORDER BY notice_id LIMIT %s"
                 params.append(limit)
                 notices = connection.execute(query, tuple(params)).fetchall()
+                if project_keys is not None and len(notices) > 25000:
+                    raise SourceError("单批项目回溯超过 25000 条公告，请缩小项目批次或核验项目关联")
                 found = [int(row["notice_id"]) for row in notices]
+                material_ids = [int(row["notice_id"]) for row in notices
+                                if not procurement_only or _notice_phase(row) in PROCUREMENT_PHASES]
                 if ids is not None and set(ids) != set(found):
                     raise SourceError("请求的部分来源公告不存在，未静默跳过")
                 attachments: list[dict] = []
@@ -430,10 +492,13 @@ class SourceClient:
                         actual = columns.get(table, set())
                         if "notice_id" not in actual:
                             continue
+                        table_ids = material_ids if table == "attachments" else found
+                        if not table_ids:
+                            continue
                         fields_present = [name for name in fields if name in actual]
                         target.extend(connection.execute(
                             "SELECT " + ", ".join(fields_present) + f" FROM public.{table} "
-                            "WHERE notice_id = ANY(%s)", (found,)
+                            "WHERE notice_id = ANY(%s)", (table_ids,)
                         ).fetchall())
                     hashes = list({att["sha256"] for att in attachments if att.get("sha256")})
                     if hashes and "sha256" in columns["attachments"]:
@@ -454,11 +519,12 @@ class SourceClient:
             for row in notices:
                 nid = int(row["notice_id"])
                 warnings: list[str] = []
-                body = self._read_source_file(row.get("content_path"), warnings, "公告正文")
+                load_material = not procurement_only or _notice_phase(row) in PROCUREMENT_PHASES
+                body = self._read_source_file(row.get("content_path"), warnings, "公告正文") if load_material else ""
                 if row.get("revoke_status") not in (None, "active"):
                     warnings.append("来源公告已撤销；历史标签仅供追溯")
                 att_items = []
-                for att in attachments_by_notice[nid]:
+                for att in attachments_by_notice[nid] if load_material else ():
                     att_id = _positive_id(att.get("att_id"), "att_id")
                     att_warnings: list[str] = []
                     att_text = self._read_source_file(att.get("text_path"), att_warnings, f"附件 {att_id}")
@@ -480,12 +546,13 @@ class SourceClient:
                     ))
                 results.append(NoticeInput(
                     notice_id=nid, title=_text(row.get("title")), buyer=_text(row.get("buyer")),
-                    notice_type=_text(row.get("notice_type") or row.get("channel")),
+                    notice_type=_notice_phase(row),
                     project_key=row.get("project_key_name") or row.get("project_key"),
                     publish_at=row["publish_at"].isoformat() if isinstance(row.get("publish_at"), datetime)
                     else row.get("publish_at") or None,
                     scope_summary=_text(row.get("scope_summary")), body=body,
-                    attachments=att_items, warnings=warnings,
+                    attachments=att_items, warnings=warnings, material_loaded=load_material,
+                    **_selection_metadata(row),
                     lots=[Lot(lot_no=_text(lot.get("lot_no")), lot_name=_text(lot.get("lot_name")),
                               description=_text(lot.get("description")))
                           for lot in lots_by_notice[nid]],

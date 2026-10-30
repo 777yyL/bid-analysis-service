@@ -79,6 +79,7 @@ def create_app(settings: Settings | None = None, *, source_client: SourceClient 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.initialize()
+        pipeline.project_flow.projects.bootstrap()
         task = asyncio.create_task(worker.run()) if cfg.worker_enabled else None
         v2_tasks = [asyncio.create_task(pipeline.run(kind)) for kind in ("rule", "model")] if cfg.worker_enabled else []
         if cfg.worker_enabled:

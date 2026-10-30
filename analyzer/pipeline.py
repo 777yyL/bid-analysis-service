@@ -6,8 +6,9 @@ import logging
 import time
 
 from analyzer.llm import JudgeError
+from analyzer.project_flow import ProjectFlow
 from analyzer.schemas import NoticeInput
-from analyzer.source import SourceError
+from analyzer.source import SourceClient, SourceError
 from analyzer.store import digest
 from analyzer.tag_model import TagJudge
 from analyzer.tagging import analyze_tags
@@ -20,6 +21,7 @@ class Pipeline:
         self.cfg, self.ws, self.source = cfg, ws, source
         self.judge = TagJudge(judge)
         self.sync_lock = asyncio.Lock()
+        self.project_flow = ProjectFlow(cfg, ws, source, judge, self.scheduler)
 
     def scheduler(self):
         control = self.ws.state("scheduler", {})
@@ -46,6 +48,8 @@ class Pipeline:
                 return
 
     async def run_once(self, kind):
+        if await self.project_flow.run_once(kind):
+            return True
         scheduler = self.scheduler()
         if scheduler["paused"] or (kind == "model" and (
                 scheduler["model_paused"] or not self.cfg.llm_enabled)):
@@ -139,7 +143,8 @@ class Pipeline:
                 raise ValueError("请先导入或同步词库")
             if mode == "page":
                 ids = await self.source.list_notice_ids(page, page_size)
-                notices = await self.source.fetch_notice_batch(ids)
+                kwargs = {"procurement_only": True} if isinstance(self.source, SourceClient) else {}
+                notices = await self.source.fetch_notice_batch(ids, **kwargs)
                 cursor = None
             else:
                 state = self.ws.state("sync:" + mode, {"cursor": 0})
@@ -150,11 +155,11 @@ class Pipeline:
                     since = time.time() - self.cfg.incremental_lookback_seconds
                     state["since"] = since
                     state["sweep_started"] = time.time()
-                notices = await self.source.list_notice_batch(cursor, page_size, since)
-            changed = 0
-            for notice in notices:
-                priority = 100 if mode in ("page", "incremental") else 30
-                changed += int(self.ws.ingest(notice, key, use_model, priority)["changed"])
+                kwargs = {"procurement_only": True} if isinstance(self.source, SourceClient) else {}
+                notices = await self.source.list_notice_batch(cursor, page_size, since, **kwargs)
+            priority = 100 if mode in ("page", "incremental") else 30
+            ingested = await self.project_flow.ingest(notices, key, use_model, priority, backfill=True)
+            changed = ingested["changed"]
             if mode != "page":
                 state["cursor"] = max([cursor, *[n.notice_id for n in notices]])
                 state["last_batch_at"] = time.time()

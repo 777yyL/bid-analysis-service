@@ -51,6 +51,17 @@ class Imports(StrictModel):
     use_model: bool = True
 
 
+class ProjectReanalyze(StrictModel):
+    project_key: str = Field(min_length=1)
+    use_model: bool = True
+    force: bool = False
+
+
+class ProjectReview(ReviewInput):
+    plan_id: str = Field(min_length=1, max_length=64)
+    expected_revision: str | None = None
+
+
 def router(cfg, ws, pipeline, auth):
     api = APIRouter(prefix="/api/v2", dependencies=[Depends(auth)], tags=["可视化分析"])
 
@@ -62,7 +73,7 @@ def router(cfg, ws, pipeline, auth):
 
     @api.get("/overview")
     async def overview():
-        return {**ws.overview(), "scheduler": pipeline.scheduler(),
+        return {**ws.overview(), **pipeline.project_flow.projects.stats(), "scheduler": pipeline.scheduler(),
                 "knowledge_id": ws.store.active_knowledge_id(),
                 "sync": {mode: {**ws.state("sync:" + mode, {}),
                                 "enabled": ws.state(mode + "_enabled", False),
@@ -100,12 +111,20 @@ def router(cfg, ws, pipeline, auth):
     @api.post("/notices/import")
     async def import_notices(payload: Imports):
         key, _ = knowledge()
-        return {"items": [ws.ingest(n, key, payload.use_model) for n in payload.notices]}
+        result = await pipeline.project_flow.ingest(payload.notices, key, payload.use_model)
+        return {"items": result["analyses"], **result}
 
     @api.get("/notices/{notice_id}")
     async def detail(notice_id: int):
         try:
-            return ws.detail(notice_id)
+            result = ws.detail(notice_id)
+            if result["project_key"]:
+                with ws.store.session() as s:
+                    result["project_analysis"] = pipeline.project_flow.projects.analyses(
+                        s, [result["project_key"]], include_evidence=True)[result["project_key"]]
+            else:
+                result["project_analysis"] = []
+            return result
         except KeyError:
             raise HTTPException(404, "公告不存在") from None
 
@@ -127,23 +146,43 @@ def router(cfg, ws, pipeline, auth):
 
     @api.post("/notices/{notice_id}/reanalyze")
     async def reanalyze(notice_id: int, payload: ReanalyzeInput):
-        key, _ = knowledge()
+        knowledge()
         try:
             item = ws.detail(notice_id)
-            # Rebind snapshot while preserving manual overrides.
-            ws.ingest(NoticeInput.model_validate(item["notice"]), key, False)
-            return ws.enqueue(notice_id, key, "rule", 100, payload.use_model)
+            return await pipeline.project_flow.reanalyze(item["project_key"], payload.use_model, force=True)
         except KeyError:
             raise HTTPException(404, "公告不存在") from None
+        except SourceError as error:
+            raise HTTPException(502, str(error)) from None
 
     @api.get("/projects")
     async def projects(q: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
-        return ws.projects(q, page, page_size)
+        return pipeline.project_flow.projects.listing(q, page, page_size)
+
+    @api.post("/project-analysis/reanalyze")
+    async def project_reanalyze(payload: ProjectReanalyze):
+        knowledge()
+        try:
+            return await pipeline.project_flow.reanalyze(payload.project_key, payload.use_model, payload.force)
+        except KeyError:
+            raise HTTPException(404, "项目不存在") from None
+        except SourceError as error:
+            raise HTTPException(502, str(error)) from None
+
+    @api.post("/project-analysis/review")
+    async def project_review(payload: ProjectReview):
+        _, kb = knowledge()
+        try:
+            return pipeline.project_flow.projects.review(payload, kb)
+        except KeyError:
+            raise HTTPException(404, "项目分析不存在") from None
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
 
     @api.get("/projects/{project_key:path}")
     async def project(project_key: str):
         try:
-            return ws.project(project_key)
+            return pipeline.project_flow.projects.project(project_key)
         except KeyError:
             raise HTTPException(404, "项目不存在") from None
 
@@ -162,6 +201,11 @@ def router(cfg, ws, pipeline, auth):
     @api.post("/tasks/{task_id}/retry")
     async def retry(task_id: str):
         try:
+            with ws.store.session() as s:
+                from analyzer.workspace import TaskRow
+                task = s.get(TaskRow, task_id)
+                if task and task.kind.startswith("project_"):
+                    return pipeline.project_flow.projects.retry(task_id)
             return ws.retry(task_id)
         except KeyError:
             raise HTTPException(404, "任务不存在") from None
@@ -234,8 +278,7 @@ def router(cfg, ws, pipeline, auth):
                                notice_type="更正公告", body="采购清单更正：摄像机调整为80台。"),
                    NoticeInput(notice_id=900000003, title="【演示】园林养护采购", notice_type="采购公告",
                                project_key="demo-garden", body="采购范围：绿化养护。投标业绩中包含摄像机项目。")]
-        for notice in samples:
-            ws.ingest(notice, key, use_model=False)
+        await pipeline.project_flow.ingest(samples, key, use_model=False)
         return {"notice_count": 3, "knowledge_id": key, "demo_only": True}
 
     return api

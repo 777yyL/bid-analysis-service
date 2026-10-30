@@ -76,6 +76,16 @@ class Lot(StrictModel):
     description: str = ""
 
 
+class AnalysisDocument(StrictModel):
+    notice_id: int = Field(gt=0)
+    notice_title: str = ""
+    notice_type: str = ""
+    source: str
+    text: str
+    start: int = Field(default=0, ge=0)
+    section_role: Literal["demand", "unknown"] = "unknown"
+
+
 class NoticeInput(StrictModel):
     notice_id: int = Field(gt=0)
     title: str = Field(min_length=1)
@@ -93,6 +103,8 @@ class NoticeInput(StrictModel):
     lots: list[Lot] = Field(default_factory=list, max_length=1000)
     attachments: list[Attachment] = Field(default_factory=list, max_length=1000)
     warnings: list[str] = Field(default_factory=list)
+    analysis_documents: list[AnalysisDocument] = Field(default_factory=list, max_length=100000)
+    analysis_scope: Literal["notice", "project"] = "notice"
 
     @field_validator("publish_at")
     @classmethod

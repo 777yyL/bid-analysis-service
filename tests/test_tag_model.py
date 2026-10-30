@@ -9,6 +9,26 @@ from analyzer.schemas import KnowledgeInput, NoticeInput
 from analyzer.tag_model import TagJudge
 
 
+def test_later_correction_overrides_main_and_cross_notice_evidence_is_distinct():
+    from analyzer.tag_model import finish_judgments, merge_judgments
+    notice = NoticeInput(notice_id=1, title="采购", analysis_scope="project", analysis_documents=[
+        {"notice_id": 2, "notice_type": "更正公告", "source": "body", "text": "删除交换机"}])
+    def tag(nid, status):
+        return {"dimension": "product", "category": "网络", "label": "交换机", "status": status,
+                "reason": status, "evidence": [{"notice_id": nid, "source": "body", "start": 0, "end": 10}]}
+    merged = {}
+    merge_judgments(merged, tag(1, "confirmed"), notice)
+    merge_judgments(merged, tag(2, "excluded"), notice)
+    merge_judgments(merged, tag(1, "confirmed"), notice)
+    assert not finish_judgments(merged)
+    assert next(iter(merged.values()))["status"] == "excluded"
+    merged = {}
+    merge_judgments(merged, tag(1, "confirmed"), notice)
+    merge_judgments(merged, tag(3, "confirmed"), notice)
+    assert not finish_judgments(merged)
+    assert len(next(iter(merged.values()))["evidence"]) == 2
+
+
 @pytest.mark.asyncio
 async def test_product_only_model_and_unknown_evidence_rejected():
     knowledge = KnowledgeInput.model_validate({"version": "v1", "lines": [],

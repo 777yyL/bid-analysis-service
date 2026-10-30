@@ -17,7 +17,7 @@ services:
       retries: 20
 
   analyzer:
-    image: bid-analysis-service:0.2.2
+    image: bid-analysis-service:0.3.0
     build:
       context: .
       args:

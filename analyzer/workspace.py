@@ -117,7 +117,7 @@ class Workspace:
             else:
                 s.add(StateRow(key="v2:" + key, value=json.dumps(value, ensure_ascii=False)))
 
-    def ingest(self, notice: NoticeInput, knowledge_id: str, use_model=True, priority=70):
+    def ingest(self, notice: NoticeInput, knowledge_id: str, use_model=True, priority=70, *, record_only=False):
         payload = notice.model_dump()
         revision = digest(payload)
         now = time.time()
@@ -131,13 +131,14 @@ class Workspace:
                 for name in ("title", "buyer", "notice_type", "project_key", "publish_at"):
                     setattr(row, name, getattr(notice, name))
                 row.payload, row.revision, row.knowledge_id = payload, revision, knowledge_id
-                row.analysis_status, row.updated_at = "queued", now
+                row.analysis_status, row.updated_at = "context_only" if record_only else "queued", now
                 row.material_complete, row.warnings = False, notice.warnings
                 row.analysis_meta = {}
                 # Invalidate machine conclusions immediately; manual decisions are durable.
-                s.execute(delete(TagRow).where(TagRow.notice_id == notice.notice_id, TagRow.source != "manual"))
-                self._enqueue(s, row, knowledge_id, "rule", priority, use_model)
-            elif use_model:
+                if not record_only:
+                    s.execute(delete(TagRow).where(TagRow.notice_id == notice.notice_id, TagRow.source != "manual"))
+                    self._enqueue(s, row, knowledge_id, "rule", priority, use_model)
+            elif use_model and not record_only:
                 # An explicit model request remains meaningful after a prepare-only run.
                 existing = s.scalar(select(TaskRow.id).where(
                     TaskRow.notice_id == row.notice_id, TaskRow.revision == row.revision,
@@ -452,7 +453,7 @@ class Workspace:
             task_metrics = [row.metrics for row in task_samples]
             def p95(kind):
                 values = sorted(row.metrics["processing_seconds"] for row in task_samples
-                                if row.kind == kind and type(row.metrics.get("processing_seconds")) in (int, float))
+                                if row.kind in (kind, "project_" + kind) and type(row.metrics.get("processing_seconds")) in (int, float))
                 return values[max(0, (95 * len(values) + 99) // 100 - 1)] if values else None
             throughput = s.scalar(select(func.count()).select_from(TaskRow).where(
                 TaskRow.status == "completed", TaskRow.updated_at >= time.time() - 60))
@@ -476,6 +477,9 @@ class Workspace:
                                 "rate_limits": sum(m.get("rate_limits", 0) for m in task_metrics)}}
 
     def reindex_batch(self, knowledge_id, cursor=0, limit=100, use_model=None):
+        project_service = getattr(self, "project_service", None)
+        if project_service is not None:
+            return project_service.reindex_batch(knowledge_id, cursor, limit, use_model)
         with self.store.session() as s:
             values = [n.payload for n in s.scalars(select(NoticeRow).where(NoticeRow.notice_id > cursor)
                                                   .order_by(NoticeRow.notice_id).limit(limit))]

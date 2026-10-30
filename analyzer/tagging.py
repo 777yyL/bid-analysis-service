@@ -10,15 +10,15 @@ from functools import lru_cache
 
 import ahocorasick
 
+from analyzer.procurement import procurement_sections
 from analyzer.schemas import KnowledgeInput, NoticeInput, TextCache
 
 MATCH_VERSION = "aho-nfkc-v1"
-RULE_VERSION = "context-v2"
+RULE_VERSION = "context-v3-sections"
 GENERIC = {"ai", "人工智能", "大数据", "视频", "视频监控", "物联网", "监控", "音频",
            "塔式", "工控", "准入", "黑板", "显示系统", "平台", "系统"}
 EXPERIENCE = re.compile(r"业绩|类似项目|成功案例|供应商.*(?:经验|资格)|投标人.*(?:经验|资格)")
 BACKGROUND = re.compile(r"背景介绍|历史沿革|产业园.*(?:绿化|养护)|发展规划")
-PROCUREMENT = re.compile(r"采购|购置|购入|清单|技术要求|招标范围|服务范围|建设内容|供应|配置|数量|需求|标的|设备名称|货物名称")
 NEGATION = re.compile(r"不(?:包含|含|涉及|采购|需要)|无需|排除|仅.*(?:土建|绿化|养护)")
 CLAUSE = re.compile(r"[。；;\n\r]")
 
@@ -142,12 +142,17 @@ def analyze_tags(notice: NoticeInput, knowledge: KnowledgeInput,
     for source, text in _sources(notice):
         input_chars += len(text)
         boundaries = [boundary.start() for boundary in CLAUSE.finditer(text)]
+        sections = procurement_sections(text)["spans"]
+        section_starts = [section["start"] for section in sections]
         for hit in match_terms(text, relationships, cache):
             context, excerpt_start, excerpt_end = _context(text, hit["start"], hit["end"], boundaries)
+            section_index = bisect_right(section_starts, hit["start"]) - 1
+            section = sections[section_index] if section_index >= 0 else {"role": "unknown"}
+            role = section["role"]
             for relation in relationships[hit["term"]]:
                 reason = "关键词命中，采购关系或业务归属待确认"
                 state = "candidate"
-                excluded = (EXPERIENCE.search(context) or BACKGROUND.search(context)
+                excluded = (role == "process" or (EXPERIENCE.search(context) and not section.get("mixed")) or BACKGROUND.search(context)
                             or any(normalize(pattern) in normalize(context)
                                    for pattern in relation["exclusions"] if normalize(pattern)))
                 if excluded:
@@ -157,8 +162,7 @@ def analyze_tags(notice: NoticeInput, knowledge: KnowledgeInput,
                     state, reason = "candidate", "同一上下文含否定表达，需确认否定范围"
                 elif relation["kind"] == "negative":
                     state, reason = "candidate", "命中业务负向条件，需要结合采购范围复核"
-                elif (not relation["weak"] and source != "buyer"
-                      and PROCUREMENT.search(context)):
+                elif not relation["weak"] and source != "buyer" and role == "demand":
                     state, reason = "confirmed", "明确采购上下文命中具体关键词"
                 key = (relation["dimension"], relation["category"], relation["label"])
                 hit_counts[key] += 1
@@ -168,7 +172,8 @@ def analyze_tags(notice: NoticeInput, knowledge: KnowledgeInput,
                 sample_counts[bucket] += 1
                 evidence = {"source": source, "text": context, **hit,
                             "excerpt_start": excerpt_start, "excerpt_end": excerpt_end,
-                            "negative_signal": relation["kind"] == "negative"}
+                            "negative_signal": relation["kind"] == "negative",
+                            "section_role": role, "notice_id": notice.notice_id}
                 observations[key].append((state, reason, evidence))
     tags = []
     priority = {"confirmed": 0, "candidate": 1, "excluded": 2}
