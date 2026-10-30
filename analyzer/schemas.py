@@ -82,6 +82,11 @@ class NoticeInput(StrictModel):
     buyer: str = ""
     notice_type: str = ""
     project_key: str | None = None
+    round_key: str | None = Field(default=None, max_length=200)
+    lot_key: str | None = Field(default=None, max_length=200)
+    related_notice_id: int | None = Field(default=None, gt=0)
+    revoke_status: str = "active"
+    material_loaded: bool = True
     publish_at: str | None = Field(default=None, max_length=80)
     body: str = ""
     scope_summary: str = ""
