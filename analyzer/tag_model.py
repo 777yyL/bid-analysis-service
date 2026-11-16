@@ -162,15 +162,13 @@ class TagJudge:
                    "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]}
         if cfg.llm_json_mode:
             payload["response_format"] = {"type": "json_object"}
-        await self.client._reserve(len((SYSTEM + user).encode()) + cfg.llm_max_output_tokens)
         headers = {"Content-Type": "application/json"}
         if cfg.llm_api_key.get_secret_value():
             headers["Authorization"] = "Bearer " + cfg.llm_api_key.get_secret_value()
         started = time.perf_counter()
         try:
-            response = await self.client.client.post(cfg.llm_base_url.rstrip("/") + "/chat/completions",
-                                                     json=payload, headers=headers, follow_redirects=False,
-                                                     timeout=cfg.llm_timeout_seconds)
+            response = await self.client.post_model(payload, headers,
+                len((SYSTEM + user).encode()) + cfg.llm_max_output_tokens)
         except httpx.HTTPError:
             raise JudgeError("模型连接失败或超时", retryable=True, request_count=1) from None
         if response.status_code != 200:

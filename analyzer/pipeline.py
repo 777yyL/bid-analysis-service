@@ -28,6 +28,7 @@ class Pipeline:
         return {"paused": control.get("paused", False),
                 "model_paused": control.get("model_paused", False),
                 "llm_enabled": self.cfg.llm_enabled,
+                "llm_concurrency": self.cfg.llm_concurrency,
                 "llm_rpm": control.get("llm_rpm", self.cfg.llm_rpm)}
 
     async def run(self, kind):
@@ -48,6 +49,8 @@ class Pipeline:
                 return
 
     async def run_once(self, kind):
+        if getattr(self, 'sales_enabled', lambda: False)():
+            return False
         if await self.project_flow.run_once(kind):
             return True
         scheduler = self.scheduler()
@@ -115,7 +118,8 @@ class Pipeline:
             metrics["processing_seconds"] = time.perf_counter() - started
             self.ws.finish_task(task, "completed", metrics=metrics)
         except asyncio.CancelledError:
-            self.ws.finish_task(task, "retry", "服务关闭，任务保留", retry_delay=0, metrics=metrics)
+            self.ws.finish_task(task, "retry", "服务关闭，任务保留", retry_delay=0,
+                                metrics=metrics, consume_attempt=False)
             raise
         except (JudgeError, SourceError) as error:
             retry = error.retryable and task["attempts"] < self.cfg.job_max_attempts
@@ -202,6 +206,9 @@ class Pipeline:
         next_incremental = 0.0
         next_retry = {}
         while True:
+            if getattr(self, 'sales_enabled', lambda: False)():
+                await asyncio.sleep(1)
+                continue
             if not self.scheduler()["paused"]:
                 reindex = self.ws.state("reindex", {})
                 if reindex.get("enabled") and time.time() >= next_retry.get("reindex", 0):

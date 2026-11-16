@@ -39,6 +39,8 @@ class Worker:
                 return
 
     async def run_once(self) -> bool:
+        if getattr(self, 'sales_enabled', lambda: False)():
+            return False
         job = self.store.claim()
         if job is None:
             return False

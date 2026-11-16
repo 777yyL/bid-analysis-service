@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     analyzer_bind_host: str = "0.0.0.0"
     analyzer_port: int = Field(default=8100, ge=1, le=65535)
     database_url: str = "sqlite:///./analysis.db"
+    analysis_schema: str = ""
+    sales_secret_key_file: str = "./runtime/settings.key"
+    sales_engine_default: bool = True
     source_base_url: str = "http://10.33.65.152:8099"
     source_api_token: SecretStr = SecretStr("")
     source_auth_header: str = "Authorization"
@@ -41,6 +44,7 @@ class Settings(BaseSettings):
     llm_json_mode: bool = True
     llm_timeout_seconds: float = Field(default=120, gt=0, le=600)
     llm_rpm: int = Field(default=5, ge=1)
+    llm_concurrency: int = Field(default=3, ge=1, le=32)
     model_no_hit_sample_percent: int = Field(default=5, ge=0, le=100)
     llm_tpm: int = Field(default=0, ge=0)
     llm_max_output_tokens: int = Field(default=3000, ge=256, le=32000)
@@ -57,6 +61,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime(self):
+        import re
+        if self.analysis_schema and (self.analysis_schema == "public" or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", self.analysis_schema)):
+            raise ValueError("ANALYSIS_SCHEMA 必须是非 public 的简单 schema 名称")
         target = make_url(self.database_url)
         if target.drivername.startswith("postgres") and self.source_db_dsn.get_secret_value():
             try:
@@ -66,7 +73,8 @@ class Settings(BaseSettings):
             if (source.get("dbname") and target.database == source["dbname"]
                     and (target.host or "localhost").casefold() == source.get("host", "localhost").casefold()
                     and (target.port or 5432) == int(source.get("port", "5432"))):
-                raise ValueError("DATABASE_URL 必须使用独立分析数据库，不能指向 SOURCE_DB_DSN 原库")
+                if not self.analysis_schema:
+                    raise ValueError("共享来源数据库必须设置独立 ANALYSIS_SCHEMA，禁止写入 public")
         if self.llm_enabled and (not self.llm_base_url or not self.llm_model):
             raise ValueError("LLM_ENABLED=true 时必须配置 LLM_BASE_URL 和 LLM_MODEL")
         if not self.source_base_url.startswith(("http://", "https://")):

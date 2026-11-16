@@ -15,6 +15,68 @@ from analyzer.workspace import TaskRow, Workspace
 
 
 @pytest.mark.asyncio
+async def test_parallel_project_reviews_do_not_repeat_completed_tasks(tmp_path):
+    cfg = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'parallel.db'}",
+        llm_enabled=True, llm_model="test", llm_base_url="https://model/v1", llm_rpm=1000000,
+        llm_concurrency=3)
+    entered, release, calls = 0, asyncio.Event(), []
+    async def respond(request):
+        nonlocal entered
+        state = json.loads(json.loads(request.content)["messages"][1]["content"])
+        calls.append(state["title"])
+        entered += 1
+        if entered == 3:
+            release.set()
+        await asyncio.wait_for(release.wait(), 3)
+        body = {"tags": [{**tag, "status": "confirmed", "reason": "采购清单", "evidence_ids": ["e1"]}
+                         for tag in state["rule_tags"]], "needs_more": False}
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "content": json.dumps(body)}}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        store = Store(cfg.database_url)
+        store.initialize()
+        ws = Workspace(store)
+        kb = KnowledgeInput.model_validate({"version": "v1", "product_keywords": [
+            {"category": "网络产品", "word": "交换机"}]})
+        key = store.save_knowledge(kb)
+        pipeline = Pipeline(cfg, ws, None, JudgeClient(cfg, http))
+        for nid in range(1, 4):
+            await pipeline.project_flow.ingest([NoticeInput(notice_id=nid, title=f"采购交换机{nid}",
+                body="采购交换机10台", notice_type="采购公告", project_key=f"p{nid}")], key, True)
+            await pipeline.project_flow.reanalyze(f"p{nid}", True, force=True, backfill=False)
+            assert await pipeline.run_once("rule")
+        assert all(await asyncio.gather(*(pipeline.run_once("model") for _ in range(3))))
+        assert len(set(calls)) == 3
+        assert all(t["status"] == "completed" for t in ws.tasks(kind="project_model")["items"])
+        assert not await pipeline.run_once("model")
+        assert len(calls) == 3
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_shared_request_gate_limits_concurrency_and_rpm():
+    import time
+    active, peak, started = 0, 0, []
+    async def respond(request):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        started.append(time.monotonic())
+        try:
+            await asyncio.sleep(0.15)
+            return httpx.Response(200, json={})
+        finally:
+            active -= 1
+    cfg = Settings(_env_file=None, llm_base_url="https://model/v1", llm_concurrency=2, llm_rpm=600)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        judge = JudgeClient(cfg, http)
+        await asyncio.gather(*(judge.post_model({}, {}, 10) for _ in range(5)))
+    assert peak == 2
+    assert len(started) == 5
+    assert all(b - a >= 0.09 for a, b in zip(started, started[1:]))
+
+
+@pytest.mark.asyncio
 async def test_model_queue_confirms_products_and_cache_retains_manual_override(tmp_path):
     cfg = Settings(_env_file=None, database_url=f"sqlite:///{tmp_path / 'pipeline.db'}",
                    llm_enabled=True, llm_base_url="https://model/v1", llm_model="test", llm_rpm=1000000)

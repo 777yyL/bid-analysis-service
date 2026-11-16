@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from analyzer.config import Settings
@@ -5,6 +7,32 @@ from analyzer.project_flow import ProjectFlow
 from analyzer.schemas import KnowledgeInput, NoticeInput, ProductKeyword
 from analyzer.store import Store
 from analyzer.workspace import Workspace
+
+
+@pytest.mark.asyncio
+async def test_shutdown_requeues_model_without_consuming_retry_or_rule_result(flow):
+    service, key = flow
+    await service.ingest([notice(1, "采购公告", "采购交换机10台")], key, True)
+    await service.reanalyze("campus", True, force=True, backfill=False)
+    assert await service.run_once("rule")
+    before = service.projects.project("campus")
+    entered = asyncio.Event()
+    async def wait_for_model(*args):
+        entered.set()
+        await asyncio.Future()
+    service.judge.judge_all = wait_for_model
+    service.cfg.llm_enabled = True
+    pending = asyncio.create_task(service.run_once("model"))
+    await asyncio.wait_for(entered.wait(), 3)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    task = service.ws.tasks(kind="project_model")["items"][0]
+    assert task["status"] == "retry"
+    assert task["attempts"] == 0
+    after = service.projects.project("campus")
+    assert after["tags"] == before["tags"]
+    assert after["analyses"][0]["revision"] == before["analyses"][0]["revision"]
 
 
 @pytest.fixture

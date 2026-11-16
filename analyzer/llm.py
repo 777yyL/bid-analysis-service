@@ -84,12 +84,21 @@ class JudgeClient:
                                                 follow_redirects=False,
                                                 trust_env=settings.http_trust_env)
         self._lock = asyncio.Lock()
+        self._slots = asyncio.Semaphore(settings.llm_concurrency)
         self._next_request = 0.0
         self._reservations = deque()
 
     async def aclose(self):
         if self._owned_client:
             await self.client.aclose()
+
+    async def post_model(self, payload, headers, tokens):
+        # Both legacy grading and project tagging share concurrency and rate budgets.
+        async with self._slots:
+            await self._reserve(tokens)
+            return await self.client.post(self.settings.llm_base_url.rstrip("/") + "/chat/completions",
+                json=payload, headers=headers, timeout=self.settings.llm_timeout_seconds,
+                follow_redirects=False)
 
     async def _reserve(self, tokens: int):
         if self.settings.llm_tpm and tokens > self.settings.llm_tpm:
@@ -135,17 +144,13 @@ class JudgeClient:
         if cfg.llm_json_mode:
             payload["response_format"] = {"type": "json_object"}
         reserved = len((SYSTEM + user).encode("utf-8")) + cfg.llm_max_output_tokens
-        await self._reserve(reserved)
         headers = {"Content-Type": "application/json"}
         key = cfg.llm_api_key.get_secret_value()
         if key:
             headers["Authorization"] = f"Bearer {key}"
         started = time.perf_counter()
         try:
-            response = await self.client.post(cfg.llm_base_url.rstrip("/") + "/chat/completions",
-                                              json=payload, headers=headers,
-                                              timeout=cfg.llm_timeout_seconds,
-                                              follow_redirects=False)
+            response = await self.post_model(payload, headers, reserved)
         except httpx.HTTPError:
             raise JudgeError("公司模型连接失败或超时", retryable=True, request_count=1) from None
         if response.status_code != 200:

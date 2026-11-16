@@ -2,7 +2,7 @@ const KEY = 'bid-analysis-api-key';
 export const savedKey = () => sessionStorage.getItem(KEY) || '';
 export const saveKey = (key: string) => key ? sessionStorage.setItem(KEY, key) : sessionStorage.removeItem(KEY);
 export async function api<T>(path: string, options: RequestInit = {}, direct = false): Promise<T> {
-  const response = await fetch(`${direct ? '' : '/api/v2'}${path}`, {
+  const response = await fetch(`${direct ? '' : '/api/v3'}${path}`, {
     ...options,
     headers: {'Content-Type': 'application/json', 'X-API-Key': savedKey(), ...options.headers}
   });

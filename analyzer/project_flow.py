@@ -186,7 +186,8 @@ class ProjectFlow:
             metrics["processing_seconds"] = time.perf_counter() - started
             self.ws.finish_task(task, "completed", metrics=metrics)
         except asyncio.CancelledError:
-            self.ws.finish_task(task, "retry", "服务关闭，保留项目任务", retry_delay=0, metrics=metrics)
+            self.ws.finish_task(task, "retry", "服务关闭，保留项目任务", retry_delay=0,
+                                metrics=metrics, consume_attempt=False)
             raise
         except (SourceError, JudgeError) as error:
             retry = error.retryable and task["attempts"] < self.cfg.job_max_attempts

@@ -11,4 +11,5 @@ dist/
 frontend/node_modules/
 frontend/dist/
 logs/
+runtime/
 *.pid

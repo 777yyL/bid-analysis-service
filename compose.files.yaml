@@ -1,0 +1,36 @@
+name: bid-file-share
+
+services:
+  file-share:
+    image: bid-analysis-service:0.8.16
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-af.hikvision.com.cn/docker/library/python:3.12-slim}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/artifactory/api/pypi/pypi/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-af.hikvision.com.cn}
+    command: ["uvicorn", "analyzer.file_share:file_app", "--factory", "--host", "0.0.0.0", "--port", "8101"]
+    environment:
+      FILE_SHARE_ROOT: /data/bidinfo
+      FILE_SHARE_API_KEY: ${FILE_SHARE_API_KEY:?Set FILE_SHARE_API_KEY}
+    volumes:
+      - ${FILE_SHARE_DATA_HOST_PATH:-/opt/bid-info-server/data}:/data/bidinfo:ro
+    ports:
+      - "${FILE_SHARE_BIND_HOST:-0.0.0.0}:${FILE_SHARE_PORT:-8101}:8101"
+    restart: unless-stopped
+    read_only: true
+    init: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8101/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

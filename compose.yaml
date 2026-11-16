@@ -5,7 +5,7 @@ services:
     image: ${ANALYSIS_DB_IMAGE:-af.hikvision.com.cn/docker/library/postgres:16-alpine}
     restart: unless-stopped
     ports:
-      - "${ANALYSIS_DB_BIND_HOST:-127.0.0.1}:${ANALYSIS_DB_PORT:-55434}:5432"
+      - "${ANALYSIS_DB_BIND_HOST:-0.0.0.0}:${ANALYSIS_DB_PORT:-55434}:5432"
     environment:
       POSTGRES_DB: bid_analysis
       POSTGRES_USER: bid_analysis
@@ -17,9 +17,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    security_opt:
+      - seccomp=unconfined
 
   analyzer:
-    image: bid-analysis-service:0.4.0
+    image: bid-analysis-service:0.8.16
     build:
       context: .
       args:
@@ -27,27 +29,17 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/artifactory/api/pypi/pypi/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-af.hikvision.com.cn}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://bid_analysis:${ANALYSIS_DB_PASSWORD}@analysis-db:5432/bid_analysis
       ANALYZER_API_KEY: ${ANALYZER_API_KEY:?Set ANALYZER_API_KEY in .env}
-      SOURCE_FILE_ROOT: /source-data
-      KNOWLEDGE_FILES_DIR: /knowledge
     volumes:
-      - type: bind
-        source: ${SOURCE_DATA_HOST_PATH:?Set SOURCE_DATA_HOST_PATH in .env}
-        target: /source-data
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${KNOWLEDGE_HOST_PATH:-./knowledge}
-        target: /knowledge
-        read_only: true
-        bind:
-          create_host_path: false
-    group_add:
-      - "${SOURCE_FILES_GID:-10001}"
+      - analysis-runtime-data:/app/runtime
     ports:
       - "${ANALYZER_BIND_HOST:-127.0.0.1}:${ANALYZER_PORT:-8100}:8100"
     depends_on:
@@ -62,4 +54,5 @@ services:
       - no-new-privileges:true
 
 volumes:
+  analysis-runtime-data:
   analysis-db-data:

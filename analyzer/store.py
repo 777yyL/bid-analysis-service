@@ -98,18 +98,28 @@ def job_dict(row: JobRow, include_payload: bool = False, include_details: bool =
 
 
 class Store:
-    def __init__(self, url: str):
+    def __init__(self, url: str, schema: str = ""):
+        import re
+        if schema and not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema):
+            raise ValueError("非法分析 schema")
+        self.schema = schema if url.startswith("postgres") else ""
         options = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             options["connect_args"] = {"check_same_thread": False, "timeout": 30}
             if ":memory:" in url:
                 options["poolclass"] = StaticPool
         self.engine = create_engine(url, **options)
+        if self.schema:
+            self.engine = self.engine.execution_options(schema_translate_map={None: self.schema})
         self.session = sessionmaker(self.engine, expire_on_commit=False)
 
-    def initialize(self):
+    def initialize(self, sales_only=False):
+        if self.schema:
+            with self.engine.begin() as connection:
+                connection.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
         # These tables belong exclusively to DATABASE_URL, never SOURCE_DB_DSN.
-        Base.metadata.create_all(self.engine)
+        tables = [t for t in Base.metadata.sorted_tables if t.name.startswith('sales_')] if sales_only else None
+        Base.metadata.create_all(self.engine, tables=tables)
 
     def close(self):
         self.engine.dispose()

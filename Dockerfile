@@ -21,7 +21,8 @@ RUN python -m pip --isolated --disable-pip-version-check install \
     --only-binary=:all: --no-cache-dir -r requirements.txt
 
 RUN groupadd --gid 10001 analyzer \
-    && useradd --uid 10001 --gid analyzer --create-home analyzer
+    && useradd --uid 10001 --gid analyzer --create-home analyzer \
+    && mkdir -p /app/runtime && chown 10001:10001 /app/runtime
 
 COPY analyzer ./analyzer
 COPY examples ./examples
