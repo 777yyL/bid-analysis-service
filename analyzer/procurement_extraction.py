@@ -41,6 +41,17 @@ def requirement_chunks(extraction, size):
                    'section_role':segment['role']}
 
 
+def extract_document_requirements(document, correction=False):
+    content = document['content']
+    if not document.get('upstream_extracted'):
+        return extract_requirements(content, correction=correction)
+    size = len(content)
+    return {'version': 'upstream-procurement-v1',
+            'segments': [{'start': 0, 'end': size, 'text': content, 'role': 'demand'}],
+            'original_chars': size, 'extracted_chars': size, 'demand_chars': size,
+            'removed_chars': 0, 'uncertain_chars': 0, 'warnings': []}
+
+
 def extract_requirements(text, correction=False):
     classified, context = [], 'unknown'
     for start, end, line in _logical_lines(text):

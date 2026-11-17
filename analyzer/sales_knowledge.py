@@ -6,7 +6,7 @@ import time
 
 import httpx
 
-from analyzer.procurement_extraction import extract_requirements, requirement_chunks
+from analyzer.procurement_extraction import extract_document_requirements, requirement_chunks
 from analyzer.sales_models import ModelError
 from analyzer.store import digest
 from analyzer.task_trace import emit, emit_async
@@ -107,7 +107,7 @@ def prepare_material(material, cfg):
         if document['source_type']=='attachment' and not cfg['collect_attachments']:
             continue
         emit('extracting_requirements',notice_id=document['notice_id'],attachment_id=document.get('attachment_id'))
-        result = extract_requirements(document['content'],
+        result = extract_document_requirements(document,
             correction=document['notice_id'] in material.get('correction_notice_ids',[]))
         for key in totals:
             totals[key] += result[key]

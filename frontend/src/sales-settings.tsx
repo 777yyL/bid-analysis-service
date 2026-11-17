@@ -1,14 +1,12 @@
 import {useEffect, useState} from 'react';
-import {App, Alert, Button, Card, Checkbox, Collapse, Form, Input, InputNumber, Select, Space, Switch, Table, Tabs} from './ui';
+import {App, Alert, Button, Card, Checkbox, Collapse, Form, Input, InputNumber, Select, Switch, Table} from './ui';
 import {api} from './api';
 import {PageTitle} from './common';
 import {send, useSalesResource, v3} from './sales';
 import SalesSourceSync from './sales-source-sync';
-import SalesHistoryReview from './sales-history-review';
-import SalesOperations from './sales-operations';
 import SalesFileDownload from './sales-file-download';
 
-export default function SalesSettings() {
+export default function SalesSettings({shared=false}:{shared?:boolean}) {
  const state = useSalesResource<Record<string, unknown>>('/settings', 0);
  const [form] = Form.useForm();
  const [busy, setBusy] = useState(false);
@@ -30,7 +28,7 @@ export default function SalesSettings() {
   try {
    const data = await send<Record<string, unknown>>(path);
    const compatible = path === '/embedding/test' ? data.ok === true : true;
-   const summary = path === '/source/test' ? '主库直连测试成功；公告时间字段已核验，数据将按时间批次写入本地普通表。'
+   const summary = path === '/source/test' ? (shared?'同库只读连接成功，直接读取主库项目和公告。':'主库连接成功，当前部署使用来源同步模式。')
     : path === '/embedding/test' ? `向量接口测试通过，维度 ${data.dimensions}。销售项、公告正文和可选附件均使用此接口，在本地分析库保存向量。`
     : '复核接口测试通过，已返回有效的销售项判断及证据。';
    setTests(old => ({...old, [tab]:{ok:compatible, message:summary, data}}));
@@ -42,8 +40,8 @@ export default function SalesSettings() {
  const secret = (name:string, label:string, help:string) => <div key={name}><Form.Item name={name} label={label} extra={`${help}${state.data?.[name+'_configured'] ? ' 已配置，留空会保留原值。' : ''}`}><Input.Password autoComplete="new-password"/></Form.Item><Form.Item name={name+'_clear'} valuePropName="checked"><Checkbox>清除已保存的{label}</Checkbox></Form.Item></div>;
  const sections = [
   {key:'knowledge',label:'MaaS 知识库',children:<>
-   <p className="muted">每个销售项作为一个完整切片上传到 MaaS。选择知识库召回后，本服务提取采购需求并调用检索接口，无需本地销售项向量；仍需导入本地销售项目录以关联 ID、分类、产品和启用状态。</p>
-   <Form.Item name="retrieval_backend" label="销售项召回方式"><Select options={[{value:'local',label:'本地向量检索（原方式）'},{value:'maas',label:'MaaS 知识库召回'}]}/></Form.Item>
+   <p className="muted">{shared?'使用主库已提取的采购需求检索 MaaS 知识库，并按销售项 ID 关联本地目录。':'每个销售项作为一个完整切片上传到 MaaS，并按销售项 ID 关联本地目录。'}</p>
+   {!shared&&<Form.Item name="retrieval_backend" label="销售项召回方式"><Select options={[{value:'local',label:'本地向量检索（原方式）'},{value:'maas',label:'MaaS 知识库召回'}]}/></Form.Item>}
    {field('knowledge_url','知识库检索完整地址','填写文档 curl 中的完整 POST 地址，包含接口路径。本服务不会自动拼接 /v1 或 /embeddings。')}
    {field('knowledge_id','知识库 ID','填写 knowledgeId；多个知识库按平台约定用英文逗号分隔。')}
    {field('knowledge_workspace_id','工作空间 ID（可选）','对应 workspaceId；平台不需要时保持为空。')}
@@ -108,12 +106,17 @@ export default function SalesSettings() {
    <Button className="section-row" loading={busy} onClick={()=>probe('/embedding/test')}>保存并测试向量模型</Button>
   </>},
   {key:'review', label:'模型复核', children:<>
-   {toggle('low_score_review_enabled','仅对低相似度候选进行模型复核','默认开启。低于下方阈值的候选必须经过模型复核；模型仍无法确认时保留待确认，不自动打标签。高分候选按人工确认开关处理。尚未配置复核接口时，低分项目会提示配置缺失，低分候选不自动采纳。关闭则沿用原有复核策略。')}
+   {shared?<Alert type="info" message="召回候选逐项复核。确认才打标签，排除后不展示为命中。"/>:<>
+   {toggle('low_score_review_enabled','仅对低相似度候选进行模型复核','低于下方阈值的候选经过模型复核。')}
    {field('review_score_threshold','自动采纳相似度阈值（低于此值需复核）','默认 0.80，为初始验证值。召回阈值应低于此值（知识库默认 0.20）；低于召回阈值的切片不会返回，也无法复核。本地模式也需相应调低候选阈值。不同模型须分别验证。',0,1)}
    <p className="muted">向量检索先筛出候选，再让语言模型结合采购原文判断不确定项。这里配置的是复核语言模型，与向量模型是两种用途。</p>
    {toggle('review_enabled','启用模型复核','默认开启。填写接口和模型后复核低分候选；关闭后，仍要求低分复核的候选会保留待确认。')}
+   </>}
    {field('review_base_url','复核接口地址','填写 OpenAI 兼容服务地址，例如 http://模型主机:端口/v1；服务会调用 /chat/completions。')}
    {field('review_model','复核模型名称','填写语言模型服务实际提供的模型标识。')}
+   <Form.Item name="review_system_prompt" label="复核系统提示词" extra="可补充公司软件业务范围和典型误匹配案例。留空使用内置规则：明确采购对应的软件能力才打标，证据不足则排除。">
+    <Input.TextArea rows={5} maxLength={4000}/>
+   </Form.Item>
    {secret('review_api_key','复核接口密钥','使用复核模型服务的认证密钥。')}
    {field('review_concurrency','同时复核的请求数','默认 3。并发有助于利用等待时间，但仍受下面 RPM、TPM 预算约束。',1,32)}
    {field('review_rpm','每分钟请求上限（RPM）','默认 5，按公司分配的可用额度填写。出现 HTTP 429 时应调低。',1,1000000)}
@@ -124,10 +127,10 @@ export default function SalesSettings() {
     {field('review_max_output_tokens','单次输出 Token 上限','默认 3000。输出需要容纳判断、理由和证据编号。',256,32000)}
    </>}]}/>
    <Button className="section-row" loading={busy} onClick={()=>probe('/review/test')}>保存并测试复核模型</Button>
-   <SalesHistoryReview beforeStart={save}/>
+
   </>},
   {key:'matching', label:'匹配规则', children:<>
-   {toggle('manual_confirmation_enabled','开启人工确认','默认关闭：未被排除的召回结果自动作为销售项标签，仍会执行已开启的模型复核；自动采纳不代表经过人工核验。开启后，分析结果需人工确认再作为标签。修改后对重新分析的项目生效。')}
+   {toggle('manual_confirmation_enabled','未经过模型复核的候选需人工确认','仅影响未经过模型复核的候选。模型确认后直接打标，排除后不打标。')}
    <p className="muted">控制哪些项目参与分析，以及候选销售项的筛选范围。先用真实正负样本验证召回与误判，再确定用于批量分析的阈值。</p>
    <Alert className="section-row" showIcon type="info" message="新配置的候选阈值为 0.80，仅作为初始验证值。不同模型接口的分数分布不同，不能直接套用同一个阈值；升级不会覆盖已保存的配置。"/>
    {toggle('allow_later_stages','纳入后期阶段项目','默认关闭，优先关注采购意向、采购公告、更正公告。开启后也处理结果、合同、验收、废标终止、其他阶段项目，仍回溯其采购主公告及更正材料。')}
@@ -137,7 +140,7 @@ export default function SalesSettings() {
    {field('no_hit_sample_percent','无命中项目抽检比例（%）','默认 5，仅在启用模型复核时生效。抽取少量无命中项目复核，帮助发现漏召回。',0,100)}
   </>},
   {key:'scheduler', label:'运行调度', children:<>
-   <SalesOperations beforeStart={save}/>
+
    {field('analysis_concurrency','分析任务并发数','默认 4，同时处理的项目任务上限。与知识库请求并发分别生效，不受扫描批次大小控制。修改前请暂停并等待运行任务结束，保存后恢复。',1,32)}
    <p className="muted">存量分析仅补齐本地尚未完成的项目；增量同步自动从主库读取下一时间批次并分析新项目。已经完成的项目不会自动重新分析，单个项目测试仍可手动强制执行。</p>
    {toggle('paused','暂停新任务消费与扫描','开启后暂停调度；已运行的请求会继续完成。修改模型或数据源前，应暂停并等待运行任务结束。')}
@@ -153,10 +156,34 @@ export default function SalesSettings() {
    <Button loading={busy} onClick={async()=>{setBusy(true);try{await send('/views/refresh');message.success('物化视图刷新任务已排队');}catch(e){message.error((e as Error).message);}finally{setBusy(false);}}}>刷新销售项物化视图</Button>
   </>},
  ];
- return <><PageTitle eyebrow="RUNTIME SETTINGS" title="系统配置" description="配置主库直连及时间批次，再配置召回与复核模型；启动自动增量后持续同步并处理新项目。" actions={<Button type="primary" loading={busy} disabled={state.loading || !!state.error} onClick={save}>保存全部配置</Button>}/>
+ const visibleSections=shared?[
+  {key:'source',label:'主库与材料',children:<>
+   <DescriptionsForSharedSource/>
+   {toggle('allow_later_stages','纳入后期阶段项目','默认只关注采购意向、采购公告和更正公告；开启后回溯后期项目的采购材料。')}
+   <Button loading={busy} onClick={()=>probe('/source/test')}>测试主库读取</Button>
+   {field('source_file_root','原文挂载目录','分析服务容器内的只读路径，用于查看公告正文和解析附件。')}
+  </>},
+  ...sections.filter(section=>section.key==='knowledge'||section.key==='review'),
+  {key:'scheduler',label:'分析调度',children:<>
+   <p className="muted">直接发现主库中有采购需求且尚无分析记录的项目，已有结果保留。失败任务在运行管理中重试。</p>
+   {toggle('engine_enabled','启用分析引擎','后台 worker 启动后才会处理任务。')}
+   {toggle('incremental_enabled','自动发现新增采购需求','直接读取主库，不复制来源数据。已完成项目不自动重跑。')}
+   {field('poll_seconds','扫描间隔（秒）','扫描一轮完成后，等待此间隔再次检查未分析项目。',1,86400)}
+   {field('analysis_concurrency','分析任务并发数','同时处理的项目数量，模型请求仍受各自限额控制。',1,32)}
+   {field('project_batch_size','每轮扫描项目数','每次扫描最多登记的项目数。',1,500)}
+  </>},
+ ]:[...sections].sort((a,b)=>(a.key==='source'?-1:b.key==='source'?1:0));
+ return <><PageTitle eyebrow="RUNTIME SETTINGS" title="系统配置" description={shared?'管理数据来源、销售项目录、知识库、模型和任务调度。':'配置主库连接、时间批次、召回与复核模型。'} actions={<Button type="primary" loading={busy} disabled={state.loading || !!state.error} onClick={save}>保存全部配置</Button>}/>
   {state.error && <Alert type="error" message={state.error}/>}
-  <Card><Space wrap><span>首次配置顺序：</span><a onClick={()=>setTab('source')}>连接主库并同步</a><span>→</span><a onClick={()=>setTab('knowledge')}>配置召回方式</a><span>→</span><a href="#/sales">导入销售项目录</a><span>→</span><a onClick={()=>setTab('scheduler')}>启动项目分析</a></Space></Card>
-  <Card className="section-row settings-tabs"><Form form={form} layout="vertical" disabled={busy || state.loading || !!state.error}><Tabs activeKey={tab} onChange={setTab} items={[...sections].sort((a,b)=>(a.key==='source'?-1:b.key==='source'?1:0)).map(section=>({...section,forceRender:true}))}/></Form>
-  {tests[tab] && <div className="section-row"><Alert showIcon type={tests[tab].ok?'success':'warning'} message={tests[tab].message}/>{tests[tab].data !== undefined && <Collapse items={[{key:'details',label:'查看接口详细返回',children:<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{JSON.stringify(tests[tab].data,null,2)}</pre>}]}/>}</div>}</Card>
+  <div className="settings-layout"><aside className="settings-nav" aria-label="配置分类"><span className="settings-caption">数据与业务</span><a href="#/sales-settings/catalog">销售项目录</a>{visibleSections.filter(section=>section.key!=='snapshot').map(section=><button key={section.key} className={tab===section.key?'active':''} onClick={()=>setTab(section.key)}>{section.label}</button>)}</aside><div className="settings-content"><Card><Form form={form} layout="vertical" disabled={busy || state.loading || !!state.error}>{visibleSections.map(section=><div key={section.key} hidden={tab!==section.key}><h2>{section.label}</h2>{section.children}</div>)}</Form>
+  {tests[tab] && <div className="section-row"><Alert showIcon type={tests[tab].ok?'success':'warning'} message={tests[tab].message}/>{tests[tab].data !== undefined && <Collapse items={[{key:'details',label:'查看接口详细返回',children:<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{JSON.stringify(tests[tab].data,null,2)}</pre>}]}/>}</div>}</Card></div></div>
  </>;
+}
+
+function DescriptionsForSharedSource(){
+ return <dl className="shared-source-details">
+  <dt>采购需求</dt><dd><code>public.notices</code> · 读取上游提取的采购需求</dd>
+  <dt>项目阶段</dt><dd><code>public.mv_project</code> · 按项目标识读取当前阶段</dd>
+  <dt>标签读取</dt><dd><code>bid_analysis.v_project_sales_tags</code> · 主服务按项目标识查询已确认的销售项</dd>
+ </dl>;
 }

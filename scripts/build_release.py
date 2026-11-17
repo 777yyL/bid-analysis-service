@@ -5,7 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 root = Path(__file__).resolve().parent.parent
-target = root / "dist" / "bid-analysis-service-0.8.16.zip"
+target = root / "dist" / "bid-analysis-service-0.8.20.zip"
 ui = root / "frontend" / "dist" / "index.html"
 if not ui.is_file():
     raise SystemExit("Build frontend first: cd frontend && npm ci && npm run build")
@@ -13,8 +13,8 @@ target.parent.mkdir(exist_ok=True)
 files = [root / name for name in (
     ".env.example", ".gitignore", ".gitattributes", "requirements.in", "requirements.txt",
     "requirements-dev.in", "requirements-dev.txt", "pyproject.toml", "Dockerfile",
-    "compose.yaml", "compose.files.yaml", ".env.files.example", ".dockerignore", ".env.docker.example")]
-for folder in ("analyzer", "tests", "examples", "scripts", "frontend/src", "frontend/scripts", "frontend/dist"):
+    "compose.yaml", "compose.files.yaml", "compose.shared.yaml", ".env.shared.example", "docs/shared-workbench-deployment.md", "docs/agent-mcp.md", ".env.files.example", ".dockerignore", ".env.docker.example")]
+for folder in ("analyzer", "tests", "examples", "scripts", "skills", "vendor/mcp-wheels", "frontend/src", "frontend/scripts", "frontend/dist"):
     files.extend(p for p in (root / folder).rglob("*")
                  if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc")
 files.extend(root / "frontend" / name for name in (

@@ -22,19 +22,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     cfg = settings or Settings()
     store = Store(cfg.database_url, cfg.analysis_schema)
     sales = SalesService(store, cfg)
+    from analyzer.agent_mcp import create_mcp
+    mcp_guard, mcp_http, mcp_queries, mcp_server = create_mcp(cfg)
 
     @asynccontextmanager
     async def lifespan(app):
-        store.initialize(sales_only=True)
+        store.initialize(sales_only=True,shared=cfg.source_mode=='shared')
         from analyzer.source_migration import migrate_local_sources
-        migrate_local_sources(sales)
+        if cfg.source_mode=='shared':
+            from analyzer.shared_source import initialize_shared
+            initialize_shared(sales)
+        else:
+            migrate_local_sources(sales)
         tasks = []
         if cfg.worker_enabled:
             tasks.extend(asyncio.create_task(sales.run(i), name=f'sales-worker-{i}') for i in range(32))
             tasks.append(asyncio.create_task(sales.scan_loop(), name='sales-scan'))
         app.state.sales_tasks = tasks
         try:
-            yield
+            async with mcp_http.router.lifespan_context(mcp_http):
+                yield
         finally:
             for task in tasks:
                 task.cancel()
@@ -42,10 +49,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             await sales.close()
+            mcp_queries.close()
             store.close()
 
     app = FastAPI(title='招标销售项分析服务', version=__version__, lifespan=lifespan)
     app.state.store, app.state.sales = store, sales
+    app.state.agent_queries, app.state.mcp_server = mcp_queries, mcp_server
     header = APIKeyHeader(name='X-API-Key', auto_error=False)
 
     async def auth(key=Depends(header)):
@@ -73,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {'status':'ok', 'version':__version__, 'worker_enabled':cfg.worker_enabled}
 
     app.include_router(sales_router(sales, auth, cfg.worker_enabled))
+    app.mount('/mcp', mcp_guard, name='agent-mcp')
     if ui.is_dir():
         app.mount('/ui', StaticFiles(directory=ui, html=True), name='ui')
     return app

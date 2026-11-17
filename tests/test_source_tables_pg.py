@@ -2,7 +2,7 @@
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import pytest
@@ -25,6 +25,21 @@ from analyzer.source_tables import (
     SyncRecord,
 )
 from analyzer.store import Store, digest
+
+
+def test_tag_delta_records_confirmation_and_removal(pg_source):
+    service, _, _, schema = pg_source
+    migrate_local_sources(service)
+    with service.store.session.begin() as session:
+        match = session.get(SalesMatch, "finished-label")
+        match.score = 0.96
+        session.flush()
+        match.status = "excluded"
+    with service.store.engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            f'SELECT operation, score, changed_at IS NOT NULL FROM "{schema}".sales_label_changes ORDER BY change_id'
+        ).all()
+    assert rows == [("upsert", 0.96, True), ("delete", None, True)]
 
 
 @pytest.fixture
@@ -187,15 +202,25 @@ def test_failed_batch_rolls_back_and_retries_same_window(pg_source):
         assert session.get(SyncBatch, "retry-batch").status == "completed"
 
 
-def test_late_attachment_text_is_rechecked_without_timestamp_change(pg_source):
+@pytest.mark.parametrize("recent", [True, False])
+def test_late_attachment_text_recheck_requires_recent_notice(pg_source, recent):
     service, dsn, _, _ = pg_source
+    with psycopg.connect(dsn) as conn:
+        now = conn.execute("SELECT transaction_timestamp()").fetchone()[0]
+        age = timedelta(hours=1) if recent else timedelta(days=8)
+        event_at = now - age
+        conn.execute("""UPDATE notices
+            SET first_seen_at=%s::timestamptz AT TIME ZONE 'Asia/Shanghai', updated_at=NULL
+            WHERE notice_id=1""", (event_at,))
+    service.save_settings({"source_sync_start_at": (event_at - timedelta(hours=1)).isoformat()})
     sync = SourceSync(service.store, service.settings())
     sync.refresh(lambda p: None, "first")
     with psycopg.connect(dsn) as conn:
         conn.execute("UPDATE attachments SET text_path='spec.pdf.mineru.txt' WHERE att_id=10")
     sync.refresh(lambda p: None, "next")
     with service.store.session() as session:
-        assert session.get(SourceAttachment, (digest(dsn), 10)).text_path == "spec.pdf.mineru.txt"
+        expected = "spec.pdf.mineru.txt" if recent else None
+        assert session.get(SourceAttachment, (digest(dsn), 10)).text_path == expected
 
 
 @pytest.mark.asyncio

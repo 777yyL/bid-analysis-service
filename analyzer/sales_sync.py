@@ -40,6 +40,8 @@ NOTICE_COLUMNS = (
     "lot_key",
     "related_notice_id",
     "content_hash",
+    "has_procurement_content",
+    "procurement_content",
 )
 
 
@@ -238,10 +240,19 @@ class SourceSync:
     def _state(self, session, key, value):
         upsert(session, SalesData, [{"key": key, "value": value}], ["key"])
 
-    def _hydrate(self, remote, session, keys, tables, batch, counts):
+    def _hydrate(self, remote, session, keys, tables, batch, counts, notice_time_expr):
         projects = remote.execute(
             "SELECT project_key,channel FROM public.mv_project WHERE project_key=ANY(%s)", (keys,)
         ).fetchall()
+        event_times = {
+            row["project_key_name"]: row["event_at"].timestamp()
+            for row in remote.execute(
+                f"""SELECT n.project_key_name, max({notice_time_expr}) AS event_at
+                    FROM public.notices n WHERE n.project_key_name=ANY(%s)
+                    GROUP BY n.project_key_name""", (keys,)
+            ).fetchall()
+            if row["event_at"] is not None
+        }
         grouped = {}
         for row in projects:
             if row["project_key"] in grouped and grouped[row["project_key"]] != row["channel"]:
@@ -343,6 +354,7 @@ class SourceSync:
                 "source_scope": self.scope,
                 "project_key": key,
                 "channel": grouped.get(key) or "",
+                "notice_event_at": event_times.get(key),
                 "in_scope": key in eligible,
                 "revision": digest([grouped.get(key), data, atts]),
                 "checked_at": time.time()
@@ -442,6 +454,7 @@ class SourceSync:
                     "notice_time_fields": fields,
                     "attachment_time_fields": att_fields,
                     "timezone": self.cfg.get("source_timezone", "Asia/Shanghai"),
+                    "recheck_since": stamp(now - timedelta(days=7)),
                 }
                 with self.store.session.begin() as s:
                     old = s.get(SyncBatch, batch_id)
@@ -490,7 +503,7 @@ class SourceSync:
                     def hydrate(keys):
                         pending = sorted(set(k for k in keys if k) - seen)
                         if pending:
-                            self._hydrate(remote, s, pending, tables, batch, counts)
+                            self._hydrate(remote, s, pending, tables, batch, counts, expr)
                             seen.update(pending)
                             progress(
                                 {
@@ -536,13 +549,22 @@ class SourceSync:
                             ):
                                 counts["attachment_events"] += len(rows)
                                 hydrate([r["project_key_name"] for r in rows])
-                    after = status.get("recheck_cursor", "")
+                    after = status.get("recheck_cursor", "") if status.get("source_scope") == self.scope else ""
+                    recheck_window = SourceProject.notice_event_at.between(
+                        (now - timedelta(days=7)).timestamp(), now.timestamp()
+                    )
                     pending_keys = select(SourceProject.project_key).where(
-                        SourceProject.source_scope == self.scope, SourceProject.channel == ""
+                        SourceProject.source_scope == self.scope, SourceProject.channel == "",
+                        recheck_window,
                     )
                     if self.cfg["collect_attachments"]:
                         pending_keys = pending_keys.union(
                             select(SourceNotice.project_key_name)
+                            .join(
+                                SourceProject,
+                                (SourceProject.source_scope == SourceNotice.source_scope)
+                                & (SourceProject.project_key == SourceNotice.project_key_name),
+                            )
                             .join(
                                 SourceAttachment,
                                 (SourceAttachment.notice_id == SourceNotice.notice_id)
@@ -550,6 +572,7 @@ class SourceSync:
                             )
                             .where(
                                 SourceNotice.source_scope == self.scope,
+                                recheck_window,
                                 or_(
                                     SourceAttachment.text_path.is_(None),
                                     SourceAttachment.text_path == "",
@@ -738,9 +761,9 @@ class SnapshotSource(SalesSource):
     def _notice_columns(self, conn):
         return set(NOTICE_COLUMNS)
 
-    def project_material(self, project_key, allow_later=False):
+    def project_material(self, project_key, allow_later=False, *, raw_files=False):
         self.project_key = project_key
-        material = super().project_material(project_key, allow_later)
+        material = super().project_material(project_key, allow_later, raw_files=raw_files)
         material["_snapshot_at"] = self.snapshot_at
         material["_source_project_revision"] = getattr(self, "project_revision", None)
         if self.settings.get("source_download_url"):

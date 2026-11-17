@@ -19,7 +19,7 @@ from analyzer.procurement_extraction import extract_requirements, requirement_ch
 from analyzer.sales_categories import category_matches
 from analyzer.sales_documents import LocalDocuments
 from analyzer.sales_knowledge import KnowledgeClient, prepare_material, retrieve_candidates
-from analyzer.sales_models import SalesModelClient
+from analyzer.sales_models import SalesModelClient, review_system_prompt
 from analyzer.sales_store import (
     SalesAudit,
     SalesData,
@@ -56,8 +56,18 @@ class SalesService(SalesStore):
         super().__init__(store, bootstrap)
         self.clients = {}
         self.source_factory = lambda cfg: SnapshotSource(cfg, self.store)
+        if bootstrap.source_mode=='shared':
+            from analyzer.shared_source import SharedSource
+            self.source_factory=lambda cfg:SharedSource(cfg,self.store)
         self.model_factory = SalesModelClient
         self.catalog_cache = None
+
+    def settings(self,masked=False):
+        cfg=super().settings(masked)
+        if self.bootstrap.source_mode=='shared':
+            cfg.update(retrieval_backend='maas',review_enabled=True,low_score_review_enabled=False,
+                       manual_confirmation_enabled=False,source_download_url='',history_enabled=False)
+        return cfg
 
     def save_settings(self, incoming):
         current = self.settings()
@@ -233,7 +243,7 @@ class SalesService(SalesStore):
                 await self.review_candidate(child, cfg, revision, unit.get('correction_notice_ids', []))
                 children.append(child)
             states = {c['status'] for c in children}
-            status = 'confirmed' if 'confirmed' in states else 'excluded' if states == {'excluded'} else 'candidate'
+            status = 'confirmed' if 'confirmed' in states else 'excluded'
             candidate.update(status=status, method='model', reason='分别核验各采购单元后汇总，任一单元存在明确能力需求即可命中')
             candidate['evidence'] = list({e['key']: e for child in children if child['status'] == status for e in child['evidence']}.values())
             return
@@ -243,8 +253,8 @@ class SalesService(SalesStore):
         groups = {}
         for source in evidence:
             groups.setdefault(rank.get(source.get('notice_id'), 0), []).append(source)
-        chosen, chosen_rank, states, citations = None, -1, set(), set()
-        oversized = False
+        chosen, chosen_rank, citations = None, -1, set()
+        system = review_system_prompt(cfg.get('review_system_prompt', ''))
         # Each evidence group belongs to one effective correction rank; later ranks take precedence.
         for priority, sources in sorted(groups.items()):
             context = []
@@ -253,13 +263,12 @@ class SalesService(SalesStore):
                 current_base['previous_judgment'] = {'status': chosen['status'], 'reason': chosen['reason'],
                     'instruction': '结合原采购证据确认本次更正是否修改该能力；未涉及则保留原需求'}
                 context = [e for e in evidence if e['key'] in citations][:2]
-            overhead = len(json.dumps(current_base, ensure_ascii=False)) + len(json.dumps(context, ensure_ascii=False)) + 2000
+            overhead = len(json.dumps(current_base, ensure_ascii=False)) + len(json.dumps(context, ensure_ascii=False)) + len(system) + 128
             batches, batch, size = [], [], overhead
             for source in sources:
                 cost = len(json.dumps(source, ensure_ascii=False)) + 2
                 if cost + overhead > cfg['review_max_input_chars']:
-                    oversized = True
-                    continue
+                    raise ValueError('复核证据片段超过输入预算，请调整复核输入字符上限')
                 if batch and (len(batch) >= 15 or size + cost > cfg['review_max_input_chars']):
                     batches.append(batch)
                     batch, size = [], overhead
@@ -269,23 +278,21 @@ class SalesService(SalesStore):
                 batches.append(batch)
             for batch in batches:
                 combined = list({e['key']: e for e in [*context, *batch]}.values())
-                cache_key = 'review:' + digest([revision, current_base, combined, cfg['review_model'], cfg['review_base_url']])
+                cache_key = 'review:' + digest([revision, current_base, combined, cfg['review_model'], cfg['review_base_url'], system])
                 result = self.state(cache_key)
                 if result is None:
                     result = (await self.client(cfg).review([current_base], combined))[0]
                     self.set_state(cache_key, result)
                 if priority > chosen_rank:
-                    chosen, chosen_rank, states, citations = result, priority, set(), set()
+                    chosen, chosen_rank, citations = result, priority, set()
                 if priority == chosen_rank:
-                    states.add(result['status'])
                     citations.update(result['evidence_keys'])
                     if result['status'] == 'confirmed':
                         chosen = result
-        if not chosen or oversized or len(states) > 1:
-            candidate.update(status='candidate', method='model', reason='证据存在冲突或有片段超过模型预算，保留待人工核验')
-            return
+        if not chosen:
+            raise ValueError('缺少可提交的复核原文证据')
         candidate.update(status=chosen['status'], method='model', reason=chosen['reason'])
-        candidate['evidence'] = [e for e in evidence if e['key'] in citations]
+        candidate['evidence'] = [e for e in evidence if e['key'] in chosen['evidence_keys']]
 
     async def vectorize(self, job, cfg):
         ids = job['payload'].get('ids') or []
@@ -318,7 +325,8 @@ class SalesService(SalesStore):
     async def analyze(self, job, cfg):
         key = job['payload']['project_key']
         if not job['payload'].get('force') and (
-                isinstance(self.source_factory(cfg), SnapshotSource) or job['payload'].get('preserve_existing')):
+                self.bootstrap.source_mode=='shared' or isinstance(self.source_factory(cfg), SnapshotSource)
+                or job['payload'].get('preserve_existing')):
             with self.store.session() as session:
                 existing = session.get(SalesProject, key)
                 if existing and existing.material.get('_analysis_job_id')!=job['id']:
@@ -357,6 +365,8 @@ class SalesService(SalesStore):
         matching_config.update({k:v for k,v in cfg.items() if k.startswith('knowledge_') and k!='knowledge_api_key'})
         matching_config['retrieval_backend'] = cfg['retrieval_backend']
         matching_config['manual_confirmation_enabled'] = cfg['manual_confirmation_enabled']
+        if cfg['review_enabled']:
+            matching_config['review_system_prompt'] = review_system_prompt(cfg.get('review_system_prompt', ''))
         if cfg['low_score_review_enabled']:
             matching_config.update({k:cfg[k] for k in ('low_score_review_enabled','review_score_threshold')})
         revision = digest([catalog[0], matching_config,
@@ -407,7 +417,7 @@ class SalesService(SalesStore):
                 await self.review_candidate(candidate, cfg, revision, material.get('correction_notice_ids', []), material.get('units'))
                 self.save_project(job, material, revision, 'needs_review', candidates, catalog[0], cfg)
         for candidate in candidates:
-            if candidate['status']=='excluded':
+            if candidate['status']=='excluded' or candidate['method']=='model':
                 continue
             if cfg['manual_confirmation_enabled']:
                 candidate['status']='candidate'
@@ -685,6 +695,10 @@ class SalesService(SalesStore):
         cfg = self.settings()
         maintenance_only = not cfg['engine_enabled'] or cfg['paused']
         kinds = ['sync_source'] if maintenance_only else None
+        if self.bootstrap.source_mode=='shared':
+            if maintenance_only:
+                return False
+            kinds=['analyze','review_existing']
         if not maintenance_only and isinstance(self.source_factory(cfg), SnapshotSource):
             if not SourceSync(self.store, cfg).status()['ready']:
                 # Preserve old queued analyses until a matching local snapshot is ready.
@@ -776,6 +790,10 @@ class SalesService(SalesStore):
     async def scan_once(self):
         cfg = self.settings()
         if not cfg['engine_enabled'] or cfg['paused'] or not (cfg['history_enabled'] or cfg['incremental_enabled']):
+            return
+        if self.bootstrap.source_mode=='shared':
+            from analyzer.shared_source import scan_shared
+            await scan_shared(self,cfg)
             return
         if isinstance(self.source_factory(cfg), SnapshotSource):
             if cfg['incremental_enabled'] and cfg['source_dsn']:

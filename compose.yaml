@@ -21,7 +21,7 @@ services:
       - seccomp=unconfined
 
   analyzer:
-    image: bid-analysis-service:0.8.16
+    image: bid-analysis-service:0.8.18
     build:
       context: .
       args:

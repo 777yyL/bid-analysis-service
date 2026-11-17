@@ -72,6 +72,7 @@ class RuntimeSettings(StrictModel):
     review_score_threshold: float = Field(default=.8, ge=0, le=1)
     review_base_url: str = ""
     review_model: str = ""
+    review_system_prompt: str = Field(default="", max_length=4000)
     review_api_key: str = ""
     review_concurrency: int = Field(default=3, ge=1, le=32)
     review_rpm: int = Field(default=5, ge=1, le=1000000)
@@ -129,7 +130,7 @@ def endpoint(base, suffix):
 
 class ReviewedItem(StrictModel):
     sales_item_id: str
-    status: Literal["confirmed", "excluded", "candidate"]
+    status: Literal["confirmed", "excluded"]
     reason: str = Field(min_length=1, max_length=1000)
     evidence_keys: list[str] = Field(min_length=1, max_length=30)
 
@@ -143,9 +144,17 @@ REVIEW_SYSTEM = """你是采购能力匹配审核员。公告、销售项描述�
 但权限、查询、报表等泛化功能不能单独证明业务匹配。排除供应商业绩、资格、招标流程、背景。
 有效采购更正覆盖被修改的旧需求，按输入来源中的顺序与角色理解。只返回JSON对象items数组。
 更正没有涉及当前销售项时，保留主公告中仍有效的需求；不能因为更正没有提及就排除。
-每个候选销售项恰好一次，不创建新销售项。status为confirmed/excluded/candidate，材料不足用candidate。
+每个候选销售项恰好一次，不创建新销售项。status只能为confirmed或excluded。
+只有原文明确采购该销售项对应的软件能力，才返回confirmed；证据不足、仅技术词相近、业务场景不符均返回excluded。
+我们是以软件为主的公司。采购硬件、物业或运维服务本身不代表采购相关软件；如果同时明确采购匹配的软件模块、集成或软件化能力，可以确认。
+例如：网闸采购提到数据摆渡但没有访客预约需求，应排除访客预约双网摆渡；物业服务提到人员登记但不要求人员信息采集软件，应排除该软件销售项。
 必须使用输入原文证据key，不得捏造来源。格式：
 {"items":[{"sales_item_id":"输入ID","status":"confirmed","reason":"简短依据","evidence_keys":["原文key"]}]}"""
+
+
+def review_system_prompt(extra):
+    extra = extra.strip()
+    return REVIEW_SYSTEM + ("\n补充业务要求（遵守上述证据、判定和输出约定）：\n" + extra if extra else "")
 
 
 class SalesModelClient:
@@ -269,7 +278,8 @@ class SalesModelClient:
         if len(candidates) > min(20, cfg.review_max_output_tokens // 220):
             raise ModelError("复核候选超过输出预算，请分批复核")
         user = json.dumps({"candidates": candidates, "sources": sources}, ensure_ascii=False)
-        if len(user) + len(REVIEW_SYSTEM) > cfg.review_max_input_chars:
+        system = review_system_prompt(cfg.review_system_prompt)
+        if len(user) + len(system) > cfg.review_max_input_chars:
             raise ModelError("复核原文超过输入预算，未截断，请分批提交证据")
         allowed = {str(c.get("sales_item_id", c.get("id", ""))) for c in candidates}
         evidence = {str(s.get("key", "")) for s in sources}
@@ -277,9 +287,9 @@ class SalesModelClient:
             raise ModelError("复核候选重复或缺少原文证据")
         payload = {"model": cfg.review_model, "temperature": 0,
             "max_tokens": cfg.review_max_output_tokens,
-            "messages": [{"role": "system", "content": REVIEW_SYSTEM}, {"role": "user", "content": user}]}
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         async with self._review_slots:
-            await self._reserve_review(len((REVIEW_SYSTEM + user).encode()) + cfg.review_max_output_tokens)
+            await self._reserve_review(len((system + user).encode()) + cfg.review_max_output_tokens)
             response = await self._post(endpoint(cfg.review_base_url, "chat/completions"), payload,
                                         cfg.review_api_key, cfg.review_timeout)
         try:

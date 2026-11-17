@@ -14,6 +14,7 @@ class SourceProject(Base):
     in_scope: Mapped[bool] = mapped_column(Boolean, default=True)
     revision: Mapped[str] = mapped_column(String(64))
     checked_at: Mapped[float] = mapped_column(Float, default=0, server_default="0")
+    notice_event_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     pending_analysis: Mapped[bool] = mapped_column(Boolean, default=False)
     batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     __table_args__ = (
@@ -30,6 +31,8 @@ class SourceNotice(Base):
     channel: Mapped[str] = mapped_column(Text)
     revoke_status: Mapped[str] = mapped_column(Text)
     content_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    has_procurement_content: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    procurement_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     buyer: Mapped[str | None] = mapped_column(Text, nullable=True)
     publish_at: Mapped[str | None] = mapped_column(Text, nullable=True)

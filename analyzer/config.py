@@ -3,16 +3,19 @@ from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+from typing import Literal
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     analyzer_api_key: SecretStr = SecretStr("")
+    mcp_api_key: SecretStr = SecretStr("")
     analyzer_bind_host: str = "0.0.0.0"
     analyzer_port: int = Field(default=8100, ge=1, le=65535)
     database_url: str = "sqlite:///./analysis.db"
     analysis_schema: str = ""
+    source_mode: Literal['snapshot','shared'] = 'snapshot'
     sales_secret_key_file: str = "./runtime/settings.key"
     sales_engine_default: bool = True
     source_base_url: str = "http://10.33.65.152:8099"
@@ -62,9 +65,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_runtime(self):
         import re
+        if self.mcp_api_key.get_secret_value() and self.mcp_api_key.get_secret_value()==self.analyzer_api_key.get_secret_value():
+            raise ValueError('MCP_API_KEY 必须独立于管理接口 ANALYZER_API_KEY')
         if self.analysis_schema and (self.analysis_schema == "public" or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", self.analysis_schema)):
             raise ValueError("ANALYSIS_SCHEMA 必须是非 public 的简单 schema 名称")
         target = make_url(self.database_url)
+        if self.source_mode == 'shared' and (not target.drivername.startswith('postgres') or not self.analysis_schema):
+            raise ValueError('同库模式必须使用 PostgreSQL 并设置独立 ANALYSIS_SCHEMA')
         if target.drivername.startswith("postgres") and self.source_db_dsn.get_secret_value():
             try:
                 source = conninfo_to_dict(self.source_db_dsn.get_secret_value())

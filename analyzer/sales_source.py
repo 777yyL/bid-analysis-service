@@ -80,7 +80,7 @@ class SalesSource:
     def _missing_project(self, project_key):
         raise SourceError('未找到该项目，请确认项目标识及数据同步范围')
 
-    def project_material(self, project_key, allow_later=False):
+    def project_material(self, project_key, allow_later=False, *, raw_files=False):
         if not isinstance(project_key, str) or not project_key.strip():
             raise SourceError("项目键不能为空")
         with self._connection() as conn:
@@ -100,7 +100,8 @@ class SalesSource:
             if not required <= columns:
                 raise SourceError("主服务 notices 缺少项目、公告阶段或撤销状态字段")
             selected = [name for name in ("notice_id", "title", "channel", "buyer", "publish_at", "revoke_status",
-                "round_key", "lot_key", "related_notice_id", "content_path") if name in columns]
+                "round_key", "lot_key", "related_notice_id", "content_path",
+                "has_procurement_content", "procurement_content") if name in columns]
             metadata = conn.execute("SELECT " + ", ".join(selected) +
                 " FROM public.notices WHERE project_key_name = %s ORDER BY notice_id LIMIT %s",
                 (project_key, MAX_NOTICES + 1)).fetchall()
@@ -122,13 +123,29 @@ class SalesSource:
             except SourceError as error:
                 warnings.append(f'{label}：{error}')
                 return ''
+        extracted = {}
+        pending_extraction = set()
+        if not raw_files and not self.settings.get('_raw_files'):
+            for row in metadata:
+                flag = row.get('has_procurement_content')
+                value = (row.get('procurement_content') or '').strip()
+                if flag is False:
+                    extracted[row['notice_id']] = ''
+                elif flag is True and value:
+                    extracted[row['notice_id']] = value
+                elif flag is True:
+                    warnings.append(f"公告{row['notice_id']}已标记提取成功但无内容")
+                if getattr(self,'upstream_only',False) and row['notice_id'] not in extracted:
+                    extracted[row['notice_id']]=''
+                    pending_extraction.add(row['notice_id'])
         for row in metadata:
             if row['channel'] == '更正公告' and row['revoke_status'] == 'active':
-                text[row['notice_id']] = read(row.get('content_path'), f"更正公告{row['notice_id']}")
+                nid = row['notice_id']
+                text[nid] = extracted[nid] if nid in extracted else read(row.get('content_path'), f"更正公告{nid}")
         attachment_text = {}
         if self.settings.get('collect_attachments', True):
             for att in attachments:
-                if any(n['notice_id'] == att['notice_id'] and n['channel'] == '更正公告' for n in metadata):
+                if att['notice_id'] not in extracted and any(n['notice_id'] == att['notice_id'] and n['channel'] == '更正公告' for n in metadata):
                     attachment_text[att['att_id']] = read(att.get('text_path'), f"附件{att['att_id']}")
         notices = []
         for row in metadata:
@@ -160,14 +177,15 @@ class SalesSource:
         for row in metadata:
             if row['notice_id'] not in chosen:
                 continue
-            content = text.get(row['notice_id'])
+            content = extracted.get(row['notice_id'], text.get(row['notice_id']))
             if content is None:
                 content = read(row.get('content_path'), f"公告{row['notice_id']}")
             if content:
                 documents.append({'notice_id': row['notice_id'], 'source_type': 'notice',
-                    'attachment_id': None, 'chunk_title': row['title'], 'content': content})
+                    'attachment_id': None, 'chunk_title': row['title'], 'content': content,
+                    'upstream_extracted': row['notice_id'] in extracted})
         for att in attachments:
-            if att['notice_id'] not in chosen:
+            if att['notice_id'] not in chosen or att['notice_id'] in extracted:
                 continue
             content = attachment_text.get(att['att_id'])
             if content is None:
@@ -183,7 +201,8 @@ class SalesSource:
                 "selection_reason": "；".join(dict.fromkeys(reasons)), "warnings": list(dict.fromkeys(warnings)),
                 "units": units, "documents": documents, "chunks": [], "notices": [_serialize(row) for row in metadata],
                 "attachments": [_serialize(a) for a in attachments if a['notice_id'] in chosen],
-                "status": "ready" if documents else "missing_material" if mains else "missing_primary"}
+                "status": "awaiting_extraction" if chosen & pending_extraction else "ready" if documents else "no_procurement_demand" if chosen and chosen <= extracted.keys()
+                else "missing_material" if mains else "missing_primary"}
 
     def _read_text(self, relative):
         try:

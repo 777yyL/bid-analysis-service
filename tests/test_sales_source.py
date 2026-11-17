@@ -53,6 +53,19 @@ def source(monkeypatch, database):
     return result
 
 
+def test_shared_source_waits_for_upstream_extraction_without_reading_raw(monkeypatch):
+    db=Database('采购公告')
+    db.notices[0].update(has_procurement_content=None,procurement_content=None)
+    svc=source(monkeypatch,db)
+    svc.upstream_only=True
+    svc._read_text=lambda path: (_ for _ in ()).throw(AssertionError('must not read raw files'))
+    result=svc.project_material("p'1")
+    assert result['status']=='awaiting_extraction' and result['documents']==[]
+    db.notices[0].update(has_procurement_content=True,procurement_content='采购访客管理软件，实现预约审批')
+    result=svc.project_material("p'1")
+    assert result['status']=='ready' and result['documents'][0]['upstream_extracted']
+
+
 def test_later_phase_filtered_before_loading_material(monkeypatch):
     db = Database()
     result = source(monkeypatch, db).project_material("p'1")
@@ -79,6 +92,24 @@ def test_attachments_are_read_by_default(monkeypatch):
     assert [d['source_type'] for d in result['documents']] == ['notice', 'attachment']
     assert result['documents'][1]['attachment_id'] == 3
     assert not any('bid_chunks' in q for q, _ in db.queries)
+
+
+@pytest.mark.parametrize("found", [True, False, None])
+def test_upstream_procurement_content_controls_material(monkeypatch, found):
+    db = Database('采购公告')
+    db.notices[0].update(has_procurement_content=found,
+                         procurement_content='访客预约及审批' if found else None)
+    svc = source(monkeypatch, db)
+    result = svc.project_material("p'1")
+    if found is True:
+        assert [(d['content'], d['upstream_extracted']) for d in result['documents']] == [
+            ('访客预约及审批', True)]
+    elif found is False:
+        assert result['status'] == 'no_procurement_demand'
+        assert not result['documents']
+    else:
+        assert len(result['documents']) == 2
+    assert len(svc.project_material("p'1", raw_files=True)['documents']) == 2
 
 
 def test_project_cursor_uses_bound_parameters(monkeypatch):

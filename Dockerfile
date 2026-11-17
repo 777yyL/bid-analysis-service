@@ -14,10 +14,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY requirements.txt ./
+COPY vendor/mcp-wheels /opt/mcp-wheels
 # 使用已锁定版本的 Linux wheels；缺少内网缓存时明确失败，不回退公网或在线编译。
 RUN python -m pip --isolated --disable-pip-version-check install \
     --index-url "${PIP_INDEX_URL}" \
     --trusted-host "${PIP_TRUSTED_HOST}" \
+    --find-links /opt/mcp-wheels \
     --only-binary=:all: --no-cache-dir -r requirements.txt
 
 RUN groupadd --gid 10001 analyzer \

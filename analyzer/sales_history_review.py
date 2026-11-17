@@ -107,9 +107,6 @@ async def review_project(service,job,cfg):
             match.reason=candidate['reason']
             match.evidence=candidate['evidence']
             match.method='model_backfill'
-            if cfg['manual_confirmation_enabled'] and match.status=='confirmed':
-                match.status='candidate'
-                match.reason+='；等待人工确认'
             current.updated_at=time.time()
             session.flush()
             service.update_project_status(session,current)

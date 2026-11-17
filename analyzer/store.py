@@ -113,12 +113,15 @@ class Store:
             self.engine = self.engine.execution_options(schema_translate_map={None: self.schema})
         self.session = sessionmaker(self.engine, expire_on_commit=False)
 
-    def initialize(self, sales_only=False):
+    def initialize(self, sales_only=False, shared=False):
         if self.schema:
             with self.engine.begin() as connection:
                 connection.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
         # These tables belong exclusively to DATABASE_URL, never SOURCE_DB_DSN.
         tables = [t for t in Base.metadata.sorted_tables if t.name.startswith('sales_')] if sales_only else None
+        if shared:
+            tables=[t for t in tables if t.name not in ('sales_source_projects','sales_source_notices',
+                'sales_source_attachments','sales_sync_batches','sales_sync_records','sales_document_chunks_v1')]
         Base.metadata.create_all(self.engine, tables=tables)
 
     def close(self):

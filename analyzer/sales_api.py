@@ -1,6 +1,7 @@
 """Authenticated sales-capability configuration, retrieval and durable jobs."""
 import asyncio
 import time
+from datetime import date, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -70,12 +71,60 @@ class TestProject(StrictModel):
 
 
 def router(service, auth, worker_enabled=True):
+    from analyzer.sales_reporting import DailyReports, SLICES
+    from sqlalchemy import func
+    reports = DailyReports(service)
+    shared = service.bootstrap.source_mode=='shared'
+    if shared:
+        reports.source_factory=service.source_factory
     async def query_projects(*args,**kwargs):
         try:
             return await asyncio.to_thread(service.projects,*args,**kwargs)
         except SQLAlchemyError:
             raise HTTPException(503,'数据库查询失败，请检查数据库连接和服务日志') from None
     api = APIRouter(prefix='/api/v3', dependencies=[Depends(auth)], route_class=SalesRoute)
+
+    @api.get('/deployment')
+    def deployment():
+        return {'source_mode':service.bootstrap.source_mode,'analysis_schema':service.store.schema or 'public'}
+
+    @api.get('/daily')
+    async def daily(day: date, days: int=Query(7,ge=1,le=7), refresh: bool=False):
+        def read():
+            values=[reports.load(day-timedelta(days=i),refresh) for i in range(days)]
+            return {'date':str(day),'timezone':values[0]['timezone'],
+                    'generated_at':values[0]['generated_at'], 'summary':values[0]['summary'],
+                    'days':[{'date':v['date'],**v['summary']} for v in values]}
+        return await asyncio.to_thread(read)
+
+    @api.get('/daily/projects')
+    async def daily_projects(day: date, slice: str='matched', q: str='', category: str='',
+                             product: str='', channel: str='', min_score: float|None=Query(None,ge=0,le=1),
+                             page: int=Query(1,ge=1),page_size: int=Query(30,ge=1,le=100)):
+        if slice not in SLICES:
+            raise HTTPException(422,'统计筛选范围无效')
+        return await asyncio.to_thread(reports.projects,day,slice,q,page,page_size,category,product,channel,min_score)
+
+    @api.get('/operations')
+    def operations(status: str|None=None,page: int=Query(1,ge=1),page_size: int=Query(30,ge=1,le=100)):
+        if status and status not in ('queued','retry','running','failed','completed','skipped'):
+            raise HTTPException(422,'任务状态无效')
+        with service.store.session() as session:
+            scope=SalesJob.kind.in_(['analyze','review_existing'])
+            counts=dict(session.execute(select(SalesJob.status,func.count()).where(scope).group_by(SalesJob.status)).all())
+            query=select(SalesJob).where(scope)
+            if status:
+                query=query.where(SalesJob.status==status)
+            total=session.scalar(select(func.count()).select_from(query.subquery()))
+            columns=[SalesJob.id,SalesJob.kind,SalesJob.status,SalesJob.created_at,SalesJob.updated_at,SalesJob.error,
+                     SalesJob.payload['project_key'].as_string().label('project_key'),
+                     SalesJob.progress['phase'].as_string().label('phase')]
+            rows=session.execute(query.with_only_columns(*columns).order_by(SalesJob.created_at.desc(),SalesJob.id.desc())
+                .offset((page-1)*page_size).limit(page_size)).mappings().all()
+        cfg=service.settings()
+        return {'items':[dict(r) for r in rows],'total':total,'counts':counts,
+                'paused':cfg['paused'],'incremental_enabled':cfg['incremental_enabled'],
+                'worker_enabled':worker_enabled,'history_enabled':cfg['history_enabled']}
 
     @api.get('/settings')
     async def settings():
@@ -87,6 +136,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/source/test')
     async def source_test():
+        if shared:
+            return await asyncio.to_thread(service.source_factory(service.settings()).profile)
         return await asyncio.to_thread(SourceSync(service.store, service.settings()).check)
 
     @api.post('/source/files/test')
@@ -101,6 +152,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/source/files/download')
     async def download_files():
+        if shared:
+            raise HTTPException(409,'同库模式使用本地只读材料目录，不下载来源文件')
         if not worker_enabled:
             raise HTTPException(409, '后台 worker 未启动，无法执行下载')
         cfg = service.settings()
@@ -128,6 +181,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/source/sync')
     async def sync_source():
+        if shared:
+            raise HTTPException(409,'同库模式直接读取主库，不再同步来源表')
         if not worker_enabled:
             raise HTTPException(409, '后台 worker 未启动，无法执行同步')
         cfg = service.settings()
@@ -162,6 +217,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/embedding/test')
     async def embedding_test():
+        if shared:
+            raise HTTPException(409,'同库模式使用 MaaS 知识库，不执行本地向量化')
         cfg = service.settings()
         vectors = await service.client(cfg).embed_sales([{'id': 'test', 'name': '访客管理', 'description': '访客预约、登记及通行授权'}])
         dimensions = len(vectors[0])
@@ -219,6 +276,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/views/refresh')
     async def refresh_view():
+        if shared:
+            raise HTTPException(409,'同库模式使用实时标签视图，无需刷新物化视图')
         require_worker()
         if service.store.engine.dialect.name != 'postgresql':
             raise HTTPException(409, '物化视图仅支持 PostgreSQL；本地请使用项目查询页面')
@@ -249,6 +308,8 @@ def router(service, auth, worker_enabled=True):
 
     @api.post('/sales-items/vectorize')
     async def vectorize(payload: VectorizeItems):
+        if shared:
+            raise HTTPException(409,'同库模式不使用本地向量化，请在 MaaS 管理知识库切片')
         require_worker()
         return service.enqueue('vectorize', payload.model_dump(), digest(['vectorize', payload.ids, vector_profile(service.settings())]))
 
@@ -293,7 +354,7 @@ def router(service, auth, worker_enabled=True):
             raise HTTPException(422, '请输入项目标识 project_key')
         if cfg['paused']:
             raise HTTPException(409, '调度已暂停，请先取消暂停；无需开启存量或增量扫描')
-        if not cfg['source_dsn'] or not (cfg['source_file_root'] or cfg['source_download_url']):
+        if not shared and (not cfg['source_dsn'] or not (cfg['source_file_root'] or cfg['source_download_url'])):
             raise HTTPException(409, '请先配置主库连接，以及文件分享地址或本地文本根目录')
         await asyncio.to_thread(service.require_snapshot, cfg)
         await asyncio.to_thread(service.catalog, cfg)
@@ -336,7 +397,7 @@ def router(service, auth, worker_enabled=True):
     async def start(payload: StartAnalysis):
         require_worker()
         cfg = service.settings()
-        if not cfg['source_dsn']:
+        if not shared and not cfg['source_dsn']:
             raise HTTPException(409, '请先在系统配置中保存并测试主服务数据库连接')
         if payload.mode!='incremental':
             await asyncio.to_thread(service.require_snapshot, cfg)
@@ -344,7 +405,7 @@ def router(service, auth, worker_enabled=True):
         if payload.project_keys:
             return {'items': [service.enqueue('analyze', {'project_key': key, 'force': payload.force}, digest(['analyze', key])) for key in payload.project_keys]}
         service.save_settings({payload.mode + '_enabled': True})
-        if payload.mode=='incremental':
+        if payload.mode=='incremental' and not shared:
             service.set_state('source_schedule:'+sync_signature(cfg), {'next_sync_at':0})
         if payload.force:
             service.set_state('history', {'cursor': '', 'processed': 0, 'phase': 'waiting'})
@@ -380,7 +441,8 @@ def router(service, auth, worker_enabled=True):
     @api.post('/analysis/body')
     async def project_body(payload: TestProject):
         cfg=service.settings()
-        material=await asyncio.to_thread(service.source_factory(cfg).project_material,payload.project_key,cfg['allow_later_stages'])
+        source = service.source_factory({**cfg, '_raw_files': True})
+        material=await asyncio.to_thread(source.project_material,payload.project_key,cfg['allow_later_stages'])
         return {'documents':material.get('documents',[]),'warnings':material.get('warnings',[]),
                 'status':material.get('status'),'source':'current_files'}
 

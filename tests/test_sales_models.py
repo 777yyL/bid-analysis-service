@@ -53,14 +53,22 @@ async def test_review_validates_candidates_and_evidence():
     result = {"items": [{"sales_item_id": "1", "status": "confirmed", "reason": "采购预约能力",
                         "evidence_keys": ["1:2026-11-02"]}]}
     def respond(request):
+        assert "软件能力" in json.loads(request.content)["messages"][0]["content"]
+        assert "优先核对软件交付物" in json.loads(request.content)["messages"][0]["content"]
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
             "content": json.dumps(result)}}]})
     cfg = settings(review_enabled=True, review_base_url="https://example/v1", review_model="judge",
-                   review_rpm=1000000)
+                   review_rpm=1000000, review_system_prompt="优先核对软件交付物")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         client = SalesModelClient(cfg, http)
         args = ([{"id": "1", "name": "访客"}], [{"key": "1:2026-11-02", "content": "采购访客预约系统"}])
         assert (await client.review(*args))[0]["status"] == "confirmed"
+        result["items"][0]["status"] = "excluded"
+        assert (await client.review(*args))[0]["status"] == "excluded"
+        result["items"][0]["status"] = "candidate"
+        with pytest.raises(ModelError, match="证据校验"):
+            await client.review(*args)
+        result["items"][0]["status"] = "excluded"
         result["items"][0]["evidence_keys"] = ["invented"]
         with pytest.raises(ModelError, match="证据校验"):
             await client.review(*args)

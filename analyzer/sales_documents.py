@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from analyzer.procurement_extraction import (
     EXTRACTION_VERSION,
-    extract_requirements,
+    extract_document_requirements,
     requirement_chunks,
 )
 from analyzer.sales_source import parse_vector
@@ -40,7 +40,7 @@ class LocalDocuments:
             content = document['content']
             progress({'phase':'extracting_requirements', 'notice_id':document['notice_id'],
                       'attachment_id':document.get('attachment_id')})
-            result = extract_requirements(content,
+            result = extract_document_requirements(document,
                 correction=document['notice_id'] in material.get('correction_notice_ids', []))
             extraction['input_documents'] += 1
             for name in ('original_chars', 'extracted_chars', 'removed_chars', 'demand_chars', 'uncertain_chars'):
@@ -59,7 +59,8 @@ class LocalDocuments:
             else:
                 extraction['omitted_documents'] += 1
             document_key = digest([self.scope, material['project_key'], document['notice_id'],
-                document.get('attachment_id'), document['source_type'], digest(content), self.profile])
+                document.get('attachment_id'), document['source_type'], digest(content), self.profile,
+                document.get('upstream_extracted', False)])
             for index, chunk in enumerate(requirement_chunks(result, size)):
                 chunk_id = digest([document_key, index])
                 roles[chunk_id] = chunk['section_role']

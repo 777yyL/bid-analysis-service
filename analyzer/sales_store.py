@@ -110,6 +110,7 @@ class SalesMatch(Base):
     score: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(Text)
     evidence: Mapped[list] = mapped_column(JSON)
+    updated_at: Mapped[float] = mapped_column(Float, default=time.time, onupdate=time.time)
 
 
 class SalesAudit(Base):
@@ -162,6 +163,7 @@ class SalesStore:
     def settings(self, masked=False):
         cfg = RuntimeSettings().model_dump()
         cfg['engine_enabled'] = self.bootstrap.sales_engine_default
+        cfg['source_file_root'] = self.bootstrap.source_file_root
         saved = dict(self.state('settings', {}))
         for key in SECRETS:
             if saved.get(key):

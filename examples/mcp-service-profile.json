@@ -1,0 +1,10 @@
+{
+  "name": "招标商机分析",
+  "identifier": "bid-analysis",
+  "description": "基于已治理的招标数据，查询项目、采购需求、销售项标签及复核证据，按日期、地区、分类和产品统计商机分布与已有分析结果的完成比例。区分模型确认与历史自动采纳，支持证据追溯，仅提供只读查询。",
+  "icon_file": "bid-analysis-mcp-icon.png",
+  "icon_generation": {
+    "tool": "built-in image_gen",
+    "prompt": "Create one crisp professional square app icon for a procurement opportunity analysis MCP service. A simple flat geometric mark combining a procurement document with two short lines, a magnifying glass and a small confirmation check. Dark navy and restrained teal, strong contrast, legible at 32px, centered with generous safe padding, rounded square navy tile. No text, no letters, no numbers, no gradients, no 3D, no mockup, no shadows, no decorative details. Single finished icon only, 1:1 square, transparent outside the rounded square. Intended for an enterprise agent tool catalog."
+  }
+}

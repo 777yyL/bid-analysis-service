@@ -1,5 +1,8 @@
 **
 !requirements.txt
+!vendor/
+!vendor/mcp-wheels/
+!vendor/mcp-wheels/**
 !analyzer/
 !analyzer/**
 !examples/
