@@ -1,0 +1,101 @@
+场景	售前问题	调用	参数	验收依据
+近期商机	这七天发布过公告的已分析项目有几个？	S		total=2
+近期商机	这七天至少命中一个销售项的项目有多少？	S	hit=true	total=2
+近期商机	帮我列出武汉市有软件标签的项目。	O	hit=true region_code=420100	items.0.project_key=p1
+近期商机	北京市有哪些带有效标签的采购项目？	S	region_code=110000 hit=true	items.0.project_key=p4
+近期商机	只看保存的分析结果中阶段为采购意向的项目，有几个？	S	channel=采购意向	total=0
+近期商机	上次分析时处于采购公告阶段的项目有多少？	S	channel=采购公告	total=2
+近期商机	采购公告中有模型确认标签的项目有哪些？	S	channel=采购公告 model_confirmed_only=true	items.0.project_key=p1
+近期商机	这七天已形成未匹配结论的项目有多少？	S	analysis_status=no_match	total=0
+近期商机	这七天还有哪些项目处于待复核状态？	S	analysis_status=needs_review	total=0
+近期商机	给我按最近公告时间排第一的已分析项目。	S	size=1	items.0.project_key=p4
+销售能力和产品	目录里有哪些可用的访客销售项？	C	q=访客	items.0.name=访客管理
+销售能力和产品	访客管理的能力描述怎么写？	C	q=访客管理	items.0.description.text=预约审批软件
+销售能力和产品	车辆管理属于哪个销售分类？	C	q=车辆管理	items.0.categories.0=车辆管控
+销售能力和产品	访客管理关联哪个产品？	C	q=访客管理	items.0.products.0=园区
+销售能力和产品	访客管理的销售项编号是什么？	C	q=访客管理	items.0.id=visitor
+销售能力和产品	园区产品这周覆盖了几个独立项目？	S	product=园区	total=2
+销售能力和产品	人员通行这个上级分类下有哪些相关项目？	S	category=人员通行	total=2
+销售能力和产品	只看人员通行下面的访客子类，有多少项目？	S	category=人员通行/访客	total=2
+销售能力和产品	帮我找车辆管理相关的采购项目。	CS	name=车辆管理	total=1
+销售能力和产品	访客管理对应的模型确认项目有哪些？	CS	name=访客管理 model_confirmed_only=true	items.0.project_key=p1
+标签和置信来源	多少项目至少有一个模型确认过的销售项？	S	model_confirmed_only=true	total=1
+标签和置信来源	只看模型确认且相似度高于0.85的机会。	S	model_confirmed_only=true min_score=0.85	total=1
+标签和置信来源	只看相似度严格大于0.90的机会。	S	min_score=0.9	total=0
+标签和置信来源	园区产品中超过0.89的项目有几个？	S	product=园区 min_score=0.89	total=2
+标签和置信来源	哪些项目没有核实为模型确认的访客标签？	CS	name=访客管理 hit=false model_confirmed_only=true	items.0.project_key=p4
+标签和置信来源	武汉市车辆管理有模型确认的机会吗？	CS	name=车辆管理 region_code=420100 model_confirmed_only=true	total=0
+标签和置信来源	这个项目的访客管理由谁确认？	E		match.confirmation_type=模型确认
+标签和置信来源	这个项目的车辆管理是模型确认还是历史自动采纳？	E	item=parking	match.method=knowledge_auto
+标签和置信来源	这个访客判断当时的相似度是多少？	E		match.score=0.9
+标签和置信来源	确认访客管理引用了哪条采购原文？	E		evidence.0.text~采购访客预约系统
+单项目研判	这个项目现在选了哪份主公告？	D		main_notice_ids.0=12
+单项目研判	这个项目有哪些更正被纳入分析？	D		correction_notice_ids=[]
+单项目研判	这个项目的主公告具体采购什么软件？	D		documents.0.text~车辆通行管理软件
+单项目研判	这个项目一共关联几份公告？	D		notice_total=2
+单项目研判	这个项目是否已经有已存分析结论？	D		analysis.status=matched
+单项目研判	这个项目当前的采购阶段是什么？	D		channel=采购公告
+单项目研判	这个销售项判断采用哪一份公告做证据？	E		evidence.0.notice_id=12
+单项目研判	这条判断引用的是正文还是附件？	E		evidence.0.source_type=notice
+单项目研判	访客证据有哪些可复查的片段编号？	E		evidence.0.key=notice12
+单项目研判	主公告采购需求是否在传给 Agent 时截断了？	D		documents_truncated=false
+可跟进性	北京有哪些今天仍处于采购公告阶段的商机？	O	region_code=110000 channel=采购公告 hit=true	items=[]
+可跟进性	北京那个项目目前是否已经进入结果阶段？	D	key=p4	channel=结果公告
+可跟进性	这个标的投标截止时间是什么？	D		@deadline
+可跟进性	给我可以点开的主公告原文链接。	D		@source_url
+可跟进性	这条线索对应哪个采购单位？	D		@buyer
+可跟进性	这份采购公告的预算金额是多少？	D		@budget
+可跟进性	给我本周还有三天内截止的项目清单。	S	deadline_days=3	!截止日期筛选
+可跟进性	只看仍可投标的项目，不要仅按上次分析时的阶段筛。	S	open_for_bids=true	!实时可投标状态
+可跟进性	按跟进紧迫度排出这周最值得先看的项目。	S	sort_by=deadline	!按截止时间排序
+可跟进性	这个项目采购哪些软件，能否同时列出明确的交付日期？	D		documents.0.text~车辆通行;;@delivery_date
+客户积累	哪些采购单位本周有与我们软件相关的项目？	A	group=buyer	!采购单位分组
+客户积累	本周与访客能力相关的独立客户有几家？	A	group=buyer sales_item_id=visitor	!采购单位去重
+客户积累	武汉本周哪些客户在采购园区相关能力？	A	region_code=420100 product=园区 group=buyer	!按产品和地区汇总客户
+客户积累	显示这个项目采购单位的统一客户标识。	D		@buyer_id
+客户积累	这个项目的业主单位和代理招标机构分别是哪家？	D		@buyer;;@agency
+客户积累	列出测试园区集团过去一周的所有相关项目。	S	buyer=测试园区集团	!按采购人检索
+客户积累	把本周有多次采购的业主按独立项目数排序。	A	group=buyer	!按客户统计项目数
+客户积累	近90天哪些单位反复采购通行软件？	A	days=90 group=buyer category=人员通行	!长期客户需求归集
+客户积累	本周哪些客户同时采购了车辆和访客能力？	A	group=buyer	!客户跨能力交集
+客户积累	给我这个项目所属单位的标准名称和同名归并依据。	D		@normalized_buyer;;@identity_source
+短期市场分析	这周哪些销售项覆盖的项目最多？	A	group=sales_item	groups.0.value=visitor
+短期市场分析	排名第一的销售项覆盖几个去重项目？	A	group=sales_item limit=1	groups.0.project_count=2
+短期市场分析	车辆管控分类这周覆盖多少项目？	A	category=车辆管控 group=category	groups.0.project_count=1
+短期市场分析	按产品统计各自覆盖的项目数。	A	group=product	groups.0.project_count=2
+短期市场分析	按分析结果保存的项目阶段统计数量。	A	group=channel	groups.0.label=采购公告
+短期市场分析	有哪些地区出现过已分析的机会？	A	group=region_code	total_groups=2
+短期市场分析	按日统计有公告的已分析项目，哪一天最多？	A	group=date	groups.0.project_count=2
+短期市场分析	只看经过模型确认的项目，各地区排名如何？	A	group=region_code model_confirmed_only=true	groups.0.value=420100
+短期市场分析	按分析结论分类，已匹配项目有多少？	A	group=analysis_status	groups.0.project_count=2
+短期市场分析	只返回最热门的一个销售项，告诉我榜单有没有被截断。	A	group=sales_item limit=1	truncated=true
+长期趋势和新增口径	近30天按产品统计去重项目数。	A	days=30 group=product	!长周期单次聚合
+长期趋势和新增口径	近90天按地市统计软件项目分布。	A	days=90 group=region_code	!长周期单次聚合
+长期趋势和新增口径	近半年哪个销售项出现在最多独立项目里？	A	days=180 group=sales_item	!长周期单次聚合
+长期趋势和新增口径	近一年有多少独立项目获得模型确认标签？	S	days=365 model_confirmed_only=true	!长周期单次去重
+长期趋势和新增口径	近30天武汉市项目的能力分布是什么？	A	days=30 region_code=420100 group=category	!长周期单次聚合
+长期趋势和新增口径	昨天发布过公告的已分析项目有几个？	P	days=1 back=1	cohort.all=1
+长期趋势和新增口径	昨天首次入库的公告涉及几个已分析项目？	P	days=1 back=1 time_basis=first_seen_at	cohort.all=0
+长期趋势和新增口径	哪些项目的标签是在今天首次生效的？	S	time_basis=first_confirmed_at days=1	!首次命中时间
+长期趋势和新增口径	哪些项目是今天新进入模型确认名单的？	S	time_basis=model_confirmed_at model_confirmed_only=true days=1	!模型确认时间
+长期趋势和新增口径	能直接按月给出本季度各月去重项目数吗？	A	days=90 group=month	!按月去重分组
+周报和覆盖范围	本周已分析样本里有多少独立项目？	P		cohort.all=2
+周报和覆盖范围	已分析样本涉及几份区间内发布的公告？	P		cohort.notices=3
+周报和覆盖范围	已形成最终结论的项目数是多少？	P		cohort.analyzed=2
+周报和覆盖范围	已有分析记录的样本里还有几个待复核？	P		cohort.review_pending=0
+周报和覆盖范围	已分析样本中，有有效确认标签的项目有多少？	P		cohort.matched=2
+周报和覆盖范围	本周已分析样本里最终未匹配的项目有几个？	P		cohort.no_match=0
+周报和覆盖范围	这组样本的结论完成率是多少？	P		coverage.completed_percent=100
+周报和覆盖范围	本周主库全部公告中，还有多少项目没有分析？	P		@source_unanalyzed_projects
+周报和覆盖范围	能否告诉我本周所有新采集项目的真实分析覆盖率？	P		@source_coverage_percent
+周报和覆盖范围	周报上这批统计是按发布时间还是入库时间计算的？	P		metadata.time_source=public.notices.publish_at
+地区、发现与交付	我负责整个湖北省，请覆盖省内所有地市列出本周命中项目。	O	region_code=420000 hit=true	items.0.project_key=p1
+地区、发现与交付	我输入武汉市中文名称，可以直接查出武汉项目吗？	S	region_code=武汉市 hit=true	total=1
+地区、发现与交付	我知道访客的别称是来宾接待，能按别称找出访客管理吗？	C	q=来宾接待	total=1
+地区、发现与交付	搜索公告需求中提到“车辆通行管理软件”的项目。	S	q=车辆通行管理软件	total=1
+地区、发现与交付	标题中含p4的已分析项目有哪些？	S	q=p4	items.0.project_key=p4
+地区、发现与交付	这个项目有没有证据支持预约软件？给我一条原文和证据键。	E		evidence.0.text~预约;;evidence.0.key=notice12
+地区、发现与交付	如果只看园区产品并要求模型确认，整周的项目总数是多少？	P	product=园区 model_confirmed_only=true	cohort.all=1
+地区、发现与交付	给我命中清单第二页，每页一条，与第一页分开。	S	hit=true page=2 size=1	items.0.project_key=p1
+地区、发现与交付	请给出本周已有分析项目的地区分布和统计时区。	A	group=region_code	total_groups=2;;metadata.timezone=Asia/Shanghai
+地区、发现与交付	给我一张可转发的跟进卡，含实际采购需求、采购人、公告原文链接。	D		documents.0.text~车辆通行;;@buyer;;@source_url

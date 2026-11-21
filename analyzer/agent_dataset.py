@@ -24,6 +24,7 @@ class AnalyzedDataset:
         self.conn, self.cfg, self.filters = conn, cfg, filters
         columns = dict(conn.execute(text("""SELECT column_name,data_type
             FROM information_schema.columns WHERE table_schema='public' AND table_name='notices'""")).all())
+        self.notice_columns = columns
         required = {'notice_id', 'project_key_name', 'publish_at', filters.time_basis}
         if not required <= columns.keys():
             raise SourceError('MCP 查询缺少 notices 字段：' + ', '.join(sorted(required-columns.keys())))
@@ -79,6 +80,11 @@ class AnalyzedDataset:
         if cfg['retrieval_backend'] == 'local':
             tag_conditions.extend(['i.vector_profile=:vector_profile', 'i.vector_version=i.version'])
             self.params['vector_profile'] = vector_profile(cfg)
+        self.schema_prefix = prefix
+        self.tag_sql = f"""SELECT m.project_key,m.revision,m.sales_item_id,m.score,m.method,
+                m.status,m.updated_at,i.name,i.categories,i.products
+            FROM {prefix}sales_matches_v1 m JOIN {prefix}sales_items_v1 i ON i.id=m.sales_item_id
+            WHERE {' AND '.join(tag_conditions)}"""
         selected_conditions = []
         if filters.region_code:
             selected_conditions.append('b.region_code=:region_code')

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     analyzer_api_key: SecretStr = SecretStr("")
+    mcp_dataset_mode: Literal["legacy","presales","full"] = "legacy"
     mcp_api_key: SecretStr = SecretStr("")
     analyzer_bind_host: str = "0.0.0.0"
     analyzer_port: int = Field(default=8100, ge=1, le=65535)

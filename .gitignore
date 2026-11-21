@@ -14,3 +14,7 @@ frontend/dist/
 logs/
 runtime/
 *.pid
+
+connection.private.json
+*-内网专用*.zip
+/maasapi

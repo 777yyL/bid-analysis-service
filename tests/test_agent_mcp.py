@@ -110,6 +110,29 @@ def filters(**kwargs):
     return ProjectFilter(start_date=date(2026,11,15),end_date=date(2026,11,16),**kwargs)
 
 
+def test_opportunities_require_current_stage_active_demand_and_current_tag(pg_app):
+    from analyzer.agent_queries import OpportunityFilter
+    app,_=pg_app
+    q=app.state.agent_queries
+    f=OpportunityFilter(start_date='2026-11-15',end_date='2026-11-16')
+    first=q.opportunities(f,page_size=1)
+    assert first['has_more'] and first['items'][0]['project_key']=='p4'
+    with app.state.store.engine.begin() as c:
+        c.exec_driver_sql("UPDATE public.source_projects SET channel='结果公告' WHERE project_key='p4'")
+        c.exec_driver_sql("UPDATE public.notices SET revoke_status='revoked' WHERE notice_id=12")
+    card=q.opportunities(f)['items'][0]
+    assert card['project_key']=='p1' and card['notice_id']==11 and card['buyer'] is None
+    assert q.opportunities(f.model_copy(update={'region_code':'110000'}))['items']==[]
+    assert q.opportunities(f.model_copy(update={'region_code':'420000'}))['items'][0]['notice_id']==11
+    with app.state.store.engine.begin() as c:
+        c.exec_driver_sql("UPDATE public.notices SET procurement_content='  ' WHERE notice_id=11")
+    assert not q.opportunities(f)['items']
+    with app.state.store.engine.begin() as c:
+        c.exec_driver_sql("UPDATE public.notices SET procurement_content='有效采购需求' WHERE notice_id=11")
+        c.exec_driver_sql("UPDATE bid_analysis.sales_items_v1 SET enabled=false WHERE id IN ('visitor','parking')")
+    assert not q.opportunities(f)['items']
+
+
 def test_real_cohorts_dedup_dates_filters_and_full_aggregation(pg_app):
     app,_=pg_app
     q=app.state.agent_queries
@@ -166,6 +189,9 @@ def test_real_detail_evidence_and_read_only_enforcement(pg_app):
 @pytest.mark.asyncio
 async def test_official_client_http_tools_resource_auth_validation_and_no_writes(pg_app):
     app,cfg=pg_app
+    with app.state.store.engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE project_product_tag(project_key text,tag_l1 text,tag_l2 text)")
+        conn.exec_driver_sql("INSERT INTO project_product_tag VALUES ('p3','视频','摄像机')")
     async with app.router.lifespan_context(app):
         async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app),base_url='http://testserver') as http:
             assert (await http.post('/mcp/',json={})).status_code==401
@@ -180,18 +206,20 @@ async def test_official_client_http_tools_resource_auth_validation_and_no_writes
             assert legacy.status_code==200
             assert legacy.json()['result']['protocolVersion']=='2025-11-25'
             legacy_list=await http.post('/mcp/',headers=legacy_headers,json={'jsonrpc':'2.0','id':2,'method':'tools/list'})
-            assert len(legacy_list.json()['result']['tools'])==6
+            assert len(legacy_list.json()['result']['tools'])==8
             legacy_call=await http.post('/mcp/',headers=legacy_headers,json={'jsonrpc':'2.0','id':3,
                 'method':'tools/call','params':{'name':'list_sales_items','arguments':{'q':'访客'}}})
             assert legacy_call.json()['result']['structuredContent']['total']==1
             async with Client(streamable_http_client('http://testserver/mcp/',http_client=http)) as client:
                 tools=await client.list_tools()
-                assert {t.name for t in tools.tools}=={'search_projects','get_project_detail','get_match_evidence',
-                    'list_sales_items','aggregate_projects','get_analysis_progress'}
+                assert {t.name for t in tools.tools}=={'search_opportunities','search_projects','get_project_detail','get_match_evidence',
+                    'list_sales_items','aggregate_projects','aggregate_hardware_projects','get_analysis_progress'}
                 assert all(t.annotations.read_only_hint and not t.annotations.destructive_hint for t in tools.tools)
                 assert all(t.output_schema is not None for t in tools.tools)
                 result=await client.call_tool('search_projects',{'filters':filters().model_dump(mode='json'),'page_size':1})
                 assert not result.is_error and result.structured_content['total']==2
+                hw=await client.call_tool('aggregate_hardware_projects',{'filters':{},'group_by':'tag_l1'})
+                assert not hw.is_error and hw.structured_content['groups'][0]['example_project_key']=='p3'
                 invalid=await client.call_tool('search_projects',{'filters':{'start_date':'2026-11-01','end_date':'2026-11-30'}})
                 assert invalid.is_error
                 resource=await client.read_resource('bid://analysis/glossary')
@@ -274,3 +302,39 @@ def test_unanalyzed_source_growth_does_not_reconstruct_daily_reports_or_scan_job
         assert not any('procurement_content' in s for s in statements)
     finally:
         event.remove(q.store.engine,'before_cursor_execute',capture)
+
+
+def test_hardware_reporting_independent_of_software_and_deduplicated(pg_app):
+    from analyzer.agent_hardware import HardwareFilter, hardware_report
+    from analyzer.source import SourceError
+    app,_ = pg_app
+    engine = app.state.agent_queries.store.engine
+    def run(group, limit=30, **filters):
+        return hardware_report(engine, HardwareFilter(**filters), group, limit)
+    with pytest.raises(SourceError, match='project_product_tag'):
+        run('tag_l1')
+    with app.state.store.engine.begin() as conn:
+        conn.exec_driver_sql('''CREATE TABLE project_product_tag (project_key text,tag_l1 text,tag_l2 text,
+            PRIMARY KEY(project_key,tag_l1,tag_l2))''')
+        conn.exec_driver_sql("INSERT INTO project_product_tag VALUES ('p1','视频','摄像机'),('p1','视频','硬盘'),('p3','视频','摄像机'),('p2','存储','硬盘')")
+        conn.exec_driver_sql('CREATE TABLE lots(notice_id bigint,winner text)')
+        conn.exec_driver_sql('ALTER TABLE notices ADD buyer text, ADD winner text, ADD notice_type text')
+        conn.exec_driver_sql("UPDATE notices SET buyer=' 采购甲 ' WHERE project_key_name IN ('p1','p3')")
+        conn.exec_driver_sql("""INSERT INTO notices (notice_id,project_key_name,channel,title,publish_at,revoke_status,winner) VALUES
+            (50,'p1','结果公告','中标结果','2026-11-17','active','公告汇总名'),
+            (51,'p2','结果公告','成交公告','2026-11-17','active','乙'),
+            (52,'p3','结果公告','中标候选人公示','2026-11-17','active','候选丙'),
+            (53,'p3','结果公告','中标公告','2026-11-17','revoked','已撤销丁')""")
+        conn.exec_driver_sql("INSERT INTO lots VALUES (50,'甲'),(50,'甲'),(50,'乙'),(51,'暂无')")
+    buyers = run('buyer', tag_l1='视频')
+    assert buyers['total_projects']==buyers['groups'][0]['project_count']==2 and buyers['groups'][0]['value']=='采购甲'
+    tags = run('tag_l2', tag_l2='硬盘')
+    assert [(g['parent'], g['value']) for g in tags['groups']]==[(p,'硬盘') for p in sorted(['视频','存储'])]
+    winners = run('winner', 1)
+    assert winners['total_projects']==3 and winners['attributed_projects']==2 and winners['unattributed_projects']==1
+    assert winners['total_groups']==2 and winners['has_more'] and winners['groups'][0]['value']=='乙' and winners['groups'][0]['project_count']==2
+    assert run('winner',start_date='2026-11-16',end_date='2026-11-16')['attributed_projects']==0
+    assert run('tag_l1',start_date='2026-11-14',end_date='2026-11-14')['total_projects']==0
+    assert run('tag_l1',tag_l2="' OR TRUE --")['groups']==[]
+    with pytest.raises(ValidationError):
+        HardwareFilter(start_date='2026-11-16')

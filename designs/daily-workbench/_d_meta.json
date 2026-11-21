@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "每日分析工作台": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-11-17T03:32:00.710Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-17T03:32:00.714Z",
+  "updatedAt": "2026-11-17T03:32:00.714Z"
+}

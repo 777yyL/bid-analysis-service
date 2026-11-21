@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- 页面原型：沿用现有浅色、中性色和顶部导航；所有数据为独立生成的演示数据，不连接业务接口。 -->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>标析 · 每日分析工作台原型</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header class="app-header"><a class="brand" href="#overview"><span class="brand-mark">析</span><strong>标析</strong><span class="brand-caption">采购机会工作台</span></a><nav aria-label="主导航" id="nav"></nav><span class="prototype">交互原型 · 演示数据</span></header>
+<main id="app"></main>
+<footer><span>独立页面原型 · 不读取主库，不执行模型调用，不修改分析结果</span><span>日期按北京时间 · 数字可点击查看清单</span></footer>
+<dialog id="detail" aria-label="项目详情"><div id="detail-content"></div></dialog>
+<dialog id="log" aria-label="任务日志"><div id="log-content"></div></dialog>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="data.js"></script><script src="app.js"></script>
+</body></html>

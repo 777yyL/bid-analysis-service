@@ -27,7 +27,9 @@ RUN groupadd --gid 10001 analyzer \
     && mkdir -p /app/runtime && chown 10001:10001 /app/runtime
 
 COPY analyzer ./analyzer
+COPY skills/tender-presales ./tender-skill
 COPY examples ./examples
+COPY scripts/evaluate_presales_mcp.py scripts/refresh_presales.py scripts/validate_presales.py ./scripts/
 COPY frontend/dist ./frontend/dist
 USER analyzer
 EXPOSE 8100

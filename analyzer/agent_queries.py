@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import defer
 
 from analyzer.agent_dataset import dataset
+from analyzer.agent_opportunities import card_fields, opportunity_page
 from analyzer.sales_service import SalesService
 from analyzer.sales_store import SalesItem, SalesMatch, SalesProject
 from analyzer.schemas import StrictModel
@@ -50,6 +51,13 @@ def confirmation(method):
     return '模型确认' if method in MODEL_METHODS else '人工确认' if method == 'manual' else '历史自动采纳或规则确认'
 
 
+class OpportunityFilter(ProjectFilter):
+    channel: Literal['','采购意向','采购公告','更正公告'] = ''
+    analysis_status: None = None
+    hit: Literal[True] = True
+    region_code: str = Field(default='',pattern=r'^([0-9]{6})?$',description='六位行政区划代码，省级代码覆盖该省。')
+
+
 def limited_text(value, limit):
     text = str(value or '')
     return {'text':text[:limit], 'chars':len(text), 'truncated':len(text)>limit}
@@ -87,6 +95,18 @@ class AgentQueries:
 
     def close(self):
         self.store.close()
+
+    def opportunities(self, filters: OpportunityFilter, page=1, page_size=20):
+        with dataset(self, filters) as data:
+            rows, more = opportunity_page(data,filters,page,page_size)
+            timezone = data.cfg['source_timezone']
+        for row in rows:
+            row.pop('revision')
+            row['matches'] = [public_match(m) for m in row['matches']]
+        return {'items':rows,'has_more':more,'page':page,'page_size':page_size,
+                'filters':filters.model_dump(mode='json'),'timezone':timezone,
+                'scope':'有效确认标签、主库当前处于早期采购阶段、区间内有效公告包含提取需求。',
+                'note':'卡片引用区间内最新符合条件的公告。标签证据见 get_match_evidence。按最新公告排序，最多展示30个标签。实际投标期限以公告为准。'}
 
     def search(self, filters: ProjectFilter, page=1, page_size=20):
         with dataset(self, filters) as data:
@@ -165,13 +185,25 @@ class AgentQueries:
             budget-=len(value['text'])
             documents.append({'notice_id':document['notice_id'],'title':document['chunk_title'],
                               'source':'主库采购需求提取字段',**value})
-        notice_fields=('notice_id','title','channel','publish_at','revoke_status','has_procurement_content')
+        notice_fields=('notice_id','title','channel','publish_at','revoke_status','has_procurement_content',
+                       'buyer','source_url','budget','deadline')
         notices=material.get('notices',[])
+        shown = [{k:n.get(k) for k in notice_fields} for n in notices[:100]]
+        if shown:
+            with self.store.engine.connect() as conn:
+                cols=set(conn.execute(text("""SELECT column_name FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='notices'""")).scalars())
+                info=conn.execute(text(f"""SELECT notice_id,{card_fields(cols)}
+                    FROM public.notices WHERE project_key_name=:key AND notice_id=ANY(:ids)"""),
+                    {'key':project_key,'ids':[r['notice_id'] for r in shown]}).mappings()
+                by_id={r['notice_id']:dict(r) for r in info}
+                for r in shown:
+                    r.update(by_id.get(r['notice_id'],{}))
         return {'project_key':project_key,'title':material['title'],'channel':material['channel'],
                 'procurement_status':material['status'],'analysis':recorded,
                 'main_notice_ids':material.get('main_notice_ids',[]),'correction_notice_ids':material.get('correction_notice_ids',[]),
                 'documents':documents,'documents_truncated':len(documents)<len(material.get('documents',[])) or any(d['truncated'] for d in documents),
-                'notices':[{k:n.get(k) for k in notice_fields} for n in notices[:100]],
+                'notices':shown,
                 'notice_total':len(notices),'notices_truncated':len(notices)>100,
                 'matches':[public_match(m,True) for m in matches[:50]],
                 'match_total':len(matches),'matches_truncated':len(matches)>50,
